@@ -11,13 +11,14 @@ from fastapi import (
     File,
     Form,
     Body,
+    Depends,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # -----------------------------------------------------------------------------
-# App init
+# App initialization
 # -----------------------------------------------------------------------------
 
 app = FastAPI(
@@ -26,21 +27,30 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# -----------------------------------------------------------------------------
+# CORS (FIXED for Lovable + Render)
+# -----------------------------------------------------------------------------
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://phish-halt.lovable.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["api-key", "content-type"],
 )
 
-API_KEY = os.getenv("PHISHGUARD_API_KEY", "my-secret-key")
-
 # -----------------------------------------------------------------------------
-# Auth
+# API Key
 # -----------------------------------------------------------------------------
 
-def verify_api_key(api_key: str = Header(..., alias="api-key")):
+API_KEY = os.getenv("PHISHGUARD_API_KEY")
+
+if not API_KEY:
+    raise RuntimeError("PHISHGUARD_API_KEY is not set")
+
+def require_api_key(api_key: str = Header(..., alias="api-key")):
     if api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
@@ -54,16 +64,16 @@ class EmailPayload(BaseModel):
     urls: List[str] = []
 
 # -----------------------------------------------------------------------------
-# Utilities
+# Detection Logic (Stub)
 # -----------------------------------------------------------------------------
 
 def calculate_probability(email: EmailPayload) -> float:
     score = 0.0
-    text = (email.subject + " " + email.body).lower()
+    text = f"{email.subject} {email.body}".lower()
 
     phishing_words = ["urgent", "verify", "suspend", "password", "account"]
-    for w in phishing_words:
-        if w in text:
+    for word in phishing_words:
+        if word in text:
             score += 0.15
 
     if email.urls:
@@ -71,25 +81,27 @@ def calculate_probability(email: EmailPayload) -> float:
 
     return min(score, 0.99)
 
-def risk_tier(prob: float) -> str:
-    if prob >= 0.7:
+def risk_tier(probability: float) -> str:
+    if probability >= 0.7:
         return "HOT"
-    if prob >= 0.4:
+    if probability >= 0.4:
         return "WARM"
     return "COLD"
 
 def malware_scan_stub(files: List[UploadFile]) -> dict:
-    results = []
-    for f in files:
-        results.append({
-            "filename": f.filename,
-            "status": "CLEAN",
-            "engine": "clamav",
-        })
-    return {"attachments": results}
+    return {
+        "attachments": [
+            {
+                "filename": f.filename,
+                "status": "CLEAN",
+                "engine": "clamav",
+            }
+            for f in files
+        ]
+    }
 
 # -----------------------------------------------------------------------------
-# Routes
+# Health
 # -----------------------------------------------------------------------------
 
 @app.get("/")
@@ -101,73 +113,66 @@ def health():
     return {"status": "ok", "timestamp": int(time.time())}
 
 # -----------------------------------------------------------------------------
-# SCAN — JSON (Swagger & frontend SAFE)
+# Scan — JSON (Lovable SAFE)
 # -----------------------------------------------------------------------------
 
 @app.post("/scan")
 async def scan_json(
     email: EmailPayload = Body(...),
-    api_key: str = Header(..., alias="api-key"),
+    _: None = Depends(require_api_key),
 ):
-    verify_api_key(api_key)
-
     probability = calculate_probability(email)
     tier = risk_tier(probability)
 
-    response = {
-        "email": email.dict(),
-        "phishing_probability": round(probability, 2),
-        "tier": tier,
-        "risk_score": int(probability * 100),
-        "malware_scan": {"attachments": []},
-        "timestamp": int(time.time()),
-    }
-
-    return JSONResponse(status_code=200, content=response)
+    return JSONResponse(
+        status_code=200,
+        content={
+            "email": email.dict(),
+            "phishing_probability": round(probability, 2),
+            "risk_score": int(probability * 100),
+            "tier": tier,
+            "malware_scan": {"attachments": []},
+            "timestamp": int(time.time()),
+        },
+    )
 
 # -----------------------------------------------------------------------------
-# SCAN WITH FILES — multipart/form-data
+# Scan with attachments — multipart/form-data
 # -----------------------------------------------------------------------------
 
 @app.post("/scan-with-files")
 async def scan_with_files(
     email: str = Form(...),
     files: Optional[List[UploadFile]] = File(None),
-    api_key: str = Header(..., alias="api-key"),
+    _: None = Depends(require_api_key),
 ):
-    verify_api_key(api_key)
-
     try:
-        email_data = EmailPayload(**json.loads(email))
+        email_payload = EmailPayload(**json.loads(email))
     except Exception:
         raise HTTPException(status_code=422, detail="Invalid email JSON")
 
-    probability = calculate_probability(email_data)
+    probability = calculate_probability(email_payload)
     tier = risk_tier(probability)
 
-    malware_result = malware_scan_stub(files or [])
-
     return {
-        "email": email_data.dict(),
+        "email": email_payload.dict(),
         "phishing_probability": round(probability, 2),
-        "tier": tier,
         "risk_score": int(probability * 100),
-        "malware_scan": malware_result,
+        "tier": tier,
+        "malware_scan": malware_scan_stub(files or []),
         "timestamp": int(time.time()),
     }
 
 # -----------------------------------------------------------------------------
-# SOC ENDPOINTS
+# SOC Endpoints
 # -----------------------------------------------------------------------------
 
-@app.get("/soc")
-def soc_feed(api_key: str = Header(..., alias="api-key")):
-    verify_api_key(api_key)
+@app.get("/soc/feed")
+def soc_feed(_: None = Depends(require_api_key)):
     return {"incidents": []}
 
-@app.get("/soc-metrics")
-def soc_metrics(api_key: str = Header(..., alias="api-key")):
-    verify_api_key(api_key)
+@app.get("/soc/metrics")
+def soc_metrics(_: None = Depends(require_api_key)):
     return {
         "total_alerts": 0,
         "hot": 0,
