@@ -19,7 +19,7 @@ from scanner.risk_engine import calculate_risk
 
 app = FastAPI(
     title="PhishGuard Email Security API",
-    version="1.1.0",
+    version="1.2.0",
     description="API for phishing, malware, and email threat detection"
 )
 
@@ -28,7 +28,7 @@ app = FastAPI(
 # -----------------------------------------------------------------------------
 
 API_KEY = os.getenv("API_KEY")
-NLP_SERVICE_URL = os.getenv("NLP_SERVICE_URL", "http://localhost:8001/analyze/text")
+NLP_SERVICE_URL = os.getenv("NLP_SERVICE_URL")
 
 if not API_KEY:
     raise RuntimeError("API_KEY environment variable is required")
@@ -55,7 +55,6 @@ api_key_header = APIKeyHeader(
     description="API key via Authorization header. Supports 'Bearer <key>' or raw key."
 )
 
-
 def authenticate(api_key: Optional[str] = Depends(api_key_header)):
     if not api_key:
         raise HTTPException(
@@ -75,11 +74,13 @@ def authenticate(api_key: Optional[str] = Depends(api_key_header)):
     return True
 
 # -----------------------------------------------------------------------------
-# Global exception handler
+# Global exception handler (DO NOT swallow details silently)
 # -----------------------------------------------------------------------------
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
+    # This print is critical for Render logs
+    print("UNHANDLED_EXCEPTION:", repr(exc))
     return error_response(
         message="Internal server error",
         status_code=500
@@ -144,7 +145,6 @@ class Attachment(BaseModel):
     filename: str
     base64: str
 
-
 class EmailScanRequest(BaseModel):
     subject: str
     sender: str
@@ -153,25 +153,34 @@ class EmailScanRequest(BaseModel):
     attachments: List[Attachment] = []
 
 # -----------------------------------------------------------------------------
-# NLP ML Client (safe call)
+# NLP ML Client (SAFE + RENDER-SAFE)
 # -----------------------------------------------------------------------------
 
 def call_nlp_service(subject: str, body: str):
+    if not NLP_SERVICE_URL:
+        return {
+            "text_ml_score": 0.0,
+            "signals": [],
+            "model_version": "nlp-disabled"
+        }
+
     try:
         resp = requests.post(
             NLP_SERVICE_URL,
             json={"subject": subject, "body": body},
-            timeout=3
+            timeout=5
         )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception:
-        # Fail-safe: neutral score if NLP is unavailable
-        return {
-            "text_ml_score": 0.0,
-            "signals": [],
-            "model_version": "nlp-unavailable"
-        }
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        print("NLP_SERVICE_ERROR:", repr(e))
+
+    # Fail-safe fallback
+    return {
+        "text_ml_score": 0.0,
+        "signals": [],
+        "model_version": "nlp-unavailable"
+    }
 
 # -----------------------------------------------------------------------------
 # Email scan (ENTERPRISE CORE ENDPOINT)
@@ -182,27 +191,28 @@ def scan_email(
     payload: EmailScanRequest,
     _: bool = Depends(authenticate)
 ):
-    # URL heuristic analysis
-    url_results = analyze_urls(payload.urls)
+    # --- URL heuristic analysis ---
+    url_results = analyze_urls(payload.urls or [])
 
-    # Heuristic text analysis
+    # --- Heuristic text analysis ---
     heuristic_text_findings = analyze_email_text_heuristics(
         payload.subject,
         payload.body
     )
 
-    # NLP ML analysis
+    # --- NLP ML analysis ---
     nlp_result = call_nlp_service(
         payload.subject,
         payload.body
     )
 
-    text_ml_score = nlp_result.get("text_ml_score", 0.0)
+    text_ml_score = float(nlp_result.get("text_ml_score", 0.0))
 
-    # Attachment malware scanning (ClamAV)
-    malware_hits = scan_attachments(payload.attachments)
+    # --- Attachment malware scanning ---
+    malware_hits = scan_attachments(payload.attachments or [])
 
-    # Final deterministic risk calculation
+    # --- Deterministic risk calculation ---
+    # NOTE: this matches YOUR current risk_engine expectations
     risk = calculate_risk(
         url_results=url_results,
         text_findings=heuristic_text_findings,
@@ -211,9 +221,10 @@ def scan_email(
     )
 
     return success_response({
-        **risk,
+        "risk": risk,
         "nlp_analysis": nlp_result,
         "url_analysis": url_results,
+        "email_text_analysis": heuristic_text_findings,
         "malware_analysis": {
             "detected": bool(malware_hits),
             "engine": "clamav",
