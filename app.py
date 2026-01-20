@@ -181,7 +181,7 @@ def call_nlp_service(subject: str, body: str) -> dict:
         print("NLP RAW RESPONSE:", resp.text)
 
         if resp.status_code != 200:
-            raise RuntimeError(f"NLP service returned {resp.status_code}")
+            raise RuntimeError(f"NLP returned {resp.status_code}")
 
         data = resp.json()
 
@@ -198,13 +198,6 @@ def call_nlp_service(subject: str, body: str) -> dict:
             "signals": [],
             "model_version": "nlp-unavailable"
         }
-
-    # Fail-safe fallback
-    return {
-        "text_ml_score": 0.0,
-        "signals": [],
-        "model_version": "nlp-unavailable"
-    }
 
 # -----------------------------------------------------------------------------
 # Email scan (ENTERPRISE CORE ENDPOINT)
