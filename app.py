@@ -158,13 +158,15 @@ class EmailScanRequest(BaseModel):
 
 def call_nlp_service(subject: str, body: str) -> dict:
 
-    if not NLP_SERVICE_URL:
-        print("NLP_SERVICE_URL not set")
-        return {
-            "text_ml_score": 0.0,
-            "signals": [],
-            "model_version": "nlp-unavailable"
-        }
+   if not NLP_SERVICE_URL:
+    print("NLP_SERVICE_URL not set")
+    return {
+        "text_ml_score": 0.0,
+        "signals": [],
+        "model_version": "nlp-unavailable",
+        "available": False
+    }
+
 
     payload = {
         "subject": subject,
@@ -233,12 +235,15 @@ def scan_email(
 
     # --- Risk calculation (SAFE WRAPPER) ---
     try:
-        risk = calculate_risk(
-            url_results=url_results,
-            text_findings=heuristic_text_findings,
-            malware_hits=malware_hits,
-            text_ml_score=text_ml_score
-        )
+       risk = calculate_risk(
+    	url_results=url_results,
+    	text_findings=text_findings,
+    	malware_hits=malware_hits,
+    	text_ml_score=nlp_score,
+    	url_ml_score=url_analysis.get("score", 0.0),
+    	url_ml_signals=url_analysis.get("signals", [])
+	)
+
     except Exception as e:
         # CRITICAL: log real error for Render
         print("RISK_ENGINE_ERROR:", repr(e))
