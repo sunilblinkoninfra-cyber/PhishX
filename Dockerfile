@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
 # ------------------------------------------------------------
 # Update ClamAV virus database (build-time)
 # ------------------------------------------------------------
-RUN freshclam || true
+RUN mkdir -p /var/lib/clamav && freshclam || true
 
 # ------------------------------------------------------------
 # Working directory
