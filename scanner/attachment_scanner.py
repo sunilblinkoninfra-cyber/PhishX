@@ -2,17 +2,24 @@ import base64
 import subprocess
 import tempfile
 import os
+import shutil
 
 
 def scan_attachments(attachments: list) -> list:
     """
-    Scan email attachments using ClamAV.
-    Returns list of malware hits.
+    Scan attachments using ClamAV (if available).
+    Never raises exceptions – safe for production.
     """
 
     findings = []
 
     if not attachments:
+        return findings
+
+    # Check if clamscan exists
+    clamscan_path = shutil.which("clamscan")
+    if not clamscan_path:
+        print("ClamAV not available – skipping attachment scan")
         return findings
 
     for attachment in attachments:
@@ -22,17 +29,17 @@ def scan_attachments(attachments: list) -> list:
         if not encoded:
             continue
 
+        tmp_path = None
+
         try:
-            # Decode base64
-            file_bytes = base64.b64decode(encoded)
+            file_bytes = base64.b64decode(encoded, validate=True)
 
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
                 tmp.write(file_bytes)
                 tmp_path = tmp.name
 
-            # Run clamscan
             result = subprocess.run(
-                ["clamscan", tmp_path],
+                [clamscan_path, "--no-summary", tmp_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=10,
@@ -52,9 +59,10 @@ def scan_attachments(attachments: list) -> list:
             print("ATTACHMENT_SCAN_ERROR:", repr(e))
 
         finally:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     return findings
