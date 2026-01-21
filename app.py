@@ -157,7 +157,6 @@ class EmailScanRequest(BaseModel):
 # -----------------------------------------------------------------------------
 
 def call_nlp_service(subject: str, body: str) -> dict:
-    print("CALLING NLP SERVICE")
 
     if not NLP_SERVICE_URL:
         print("NLP_SERVICE_URL not set")
