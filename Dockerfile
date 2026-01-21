@@ -1,43 +1,43 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-
+# ------------------------------------------------------------
+# System dependencies (minimal + ClamAV)
+# ------------------------------------------------------------
 RUN apt-get update && apt-get install -y \
-    build-essential \
+    clamav \
+    clamav-daemon \
+    curl \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
+# ------------------------------------------------------------
+# Update ClamAV virus database (build-time)
+# ------------------------------------------------------------
+RUN freshclam || true
+
+# ------------------------------------------------------------
+# Working directory
+# ------------------------------------------------------------
+WORKDIR /app
+
+# ------------------------------------------------------------
+# Python dependencies
+# ------------------------------------------------------------
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# ------------------------------------------------------------
+# Application source
+# ------------------------------------------------------------
 COPY . .
 
-RUN mkdir -p logs
-
+# ------------------------------------------------------------
+# Expose FastAPI port (Render injects $PORT)
+# ------------------------------------------------------------
 EXPOSE 8000
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
-FROM python:3.11-slim
-
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# ✅ Install NLTK data at build time
-RUN python - <<EOF
-import nltk
-nltk.download('stopwords')
-nltk.download('punkt')
-EOF
-
-COPY . .
-
-RUN mkdir -p logs
-
-EXPOSE 8000
-
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# ------------------------------------------------------------
+# Start ClamAV daemon + FastAPI
+# ------------------------------------------------------------
+CMD service clamav-daemon start && \
+    uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}
