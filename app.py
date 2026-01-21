@@ -32,7 +32,9 @@ NLP_SERVICE_URL = os.getenv("NLP_SERVICE_URL")
 
 if not API_KEY:
     raise RuntimeError("API_KEY environment variable is required")
+
 print("NLP_SERVICE_URL =", NLP_SERVICE_URL)
+
 # -----------------------------------------------------------------------------
 # CORS (temporary – tighten later)
 # -----------------------------------------------------------------------------
@@ -57,34 +59,24 @@ api_key_header = APIKeyHeader(
 
 def authenticate(api_key: Optional[str] = Depends(api_key_header)):
     if not api_key:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing API key"
-        )
+        raise HTTPException(status_code=401, detail="Missing API key")
 
     if api_key.lower().startswith("bearer "):
         api_key = api_key.split(" ", 1)[1].strip()
 
     if api_key != API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid API key"
-        )
+        raise HTTPException(status_code=403, detail="Invalid API key")
 
     return True
 
 # -----------------------------------------------------------------------------
-# Global exception handler (DO NOT swallow details silently)
+# Global exception handler
 # -----------------------------------------------------------------------------
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    # This print is critical for Render logs
     print("UNHANDLED_EXCEPTION:", repr(exc))
-    return error_response(
-        message="Internal server error",
-        status_code=500
-    )
+    return error_response("Internal server error", 500)
 
 # -----------------------------------------------------------------------------
 # Health
@@ -95,50 +87,7 @@ def health_check():
     return success_response({"status": "ok"})
 
 # -----------------------------------------------------------------------------
-# Legacy URL scan (kept for compatibility)
-# -----------------------------------------------------------------------------
-
-@app.post("/scan")
-def scan_url(
-    url: str,
-    _: bool = Depends(authenticate)
-):
-    if not url:
-        return error_response("URL is required", 400)
-
-    result = {
-        "url": url,
-        "phishing": False,
-        "confidence": 0.12
-    }
-
-    return success_response(result)
-
-# -----------------------------------------------------------------------------
-# Legacy batch scan (kept for compatibility)
-# -----------------------------------------------------------------------------
-
-@app.post("/scan_batch")
-def scan_batch(
-    urls: List[str],
-    _: bool = Depends(authenticate)
-):
-    if not urls:
-        return error_response("URL list cannot be empty", 400)
-
-    results = [
-        {
-            "url": url,
-            "phishing": False,
-            "confidence": 0.10
-        }
-        for url in urls
-    ]
-
-    return success_response(results)
-
-# -----------------------------------------------------------------------------
-# Email scan schemas
+# Schemas
 # -----------------------------------------------------------------------------
 
 class Attachment(BaseModel):
@@ -153,30 +102,23 @@ class EmailScanRequest(BaseModel):
     attachments: List[Attachment] = []
 
 # -----------------------------------------------------------------------------
-# NLP ML Client (SAFE + RENDER-SAFE)
+# NLP ML Client (SAFE)
 # -----------------------------------------------------------------------------
 
 def call_nlp_service(subject: str, body: str) -> dict:
-
-   if not NLP_SERVICE_URL:
-    print("NLP_SERVICE_URL not set")
-    return {
-        "text_ml_score": 0.0,
-        "signals": [],
-        "model_version": "nlp-unavailable",
-        "available": False
-    }
-
-
-    payload = {
-        "subject": subject,
-        "body": body
-    }
+    if not NLP_SERVICE_URL:
+        print("NLP_SERVICE_URL not set")
+        return {
+            "text_ml_score": 0.0,
+            "signals": [],
+            "model_version": "nlp-unavailable",
+            "available": False
+        }
 
     try:
         resp = requests.post(
             NLP_SERVICE_URL,
-            json=payload,
+            json={"subject": subject, "body": body},
             timeout=5
         )
 
@@ -188,12 +130,11 @@ def call_nlp_service(subject: str, body: str) -> dict:
 
         data = resp.json()
 
-        print("NLP PARSED SCORE:", data.get("text_ml_score"))
-
         return {
             "text_ml_score": float(data.get("text_ml_score", 0.0)),
             "signals": data.get("signals", []),
-            "model_version": data.get("model_version", "unknown")
+            "model_version": data.get("model_version", "unknown"),
+            "available": True
         }
 
     except Exception as e:
@@ -201,11 +142,12 @@ def call_nlp_service(subject: str, body: str) -> dict:
         return {
             "text_ml_score": 0.0,
             "signals": [],
-            "model_version": "nlp-unavailable"
+            "model_version": "nlp-unavailable",
+            "available": False
         }
 
 # -----------------------------------------------------------------------------
-# Email scan (ENTERPRISE CORE ENDPOINT)
+# Email scan (CORE ENDPOINT)
 # -----------------------------------------------------------------------------
 
 @app.post("/scan/email")
@@ -213,8 +155,13 @@ def scan_email(
     payload: EmailScanRequest,
     _: bool = Depends(authenticate)
 ):
-    # --- URL heuristic analysis ---
-    url_results = analyze_urls(payload.urls or [])
+    # --- URL ML analysis ---
+    url_analysis = analyze_urls(payload.urls or [])
+
+    # Normalize for legacy risk_engine
+    url_results = [
+        {"risk": "high"} if url_analysis.get("score", 0) > 0 else {"risk": "low"}
+    ]
 
     # --- Heuristic text analysis ---
     heuristic_text_findings = analyze_email_text_heuristics(
@@ -223,49 +170,43 @@ def scan_email(
     )
 
     # --- NLP ML analysis ---
-    nlp_result = call_nlp_service(
-        payload.subject,
-        payload.body
-    )
-
+    nlp_result = call_nlp_service(payload.subject, payload.body)
     text_ml_score = float(nlp_result.get("text_ml_score", 0.0))
 
     # --- Attachment scanning ---
     malware_hits = scan_attachments(payload.attachments or [])
 
-    # --- Risk calculation (SAFE WRAPPER) ---
+    # --- Risk calculation ---
     try:
-       risk = calculate_risk(
-    	url_results=url_results,
-    	text_findings=text_findings,
-    	malware_hits=malware_hits,
-    	text_ml_score=nlp_score,
-    	url_ml_score=url_analysis.get("score", 0.0),
-    	url_ml_signals=url_analysis.get("signals", [])
-	)
-
+        risk = calculate_risk(
+            url_results=url_results,
+            text_findings=heuristic_text_findings,
+            malware_hits=malware_hits,
+            text_ml_score=text_ml_score,
+            url_ml_score=url_analysis.get("score", 0.0),
+            url_ml_signals=url_analysis.get("signals", [])
+        )
     except Exception as e:
-        # CRITICAL: log real error for Render
         print("RISK_ENGINE_ERROR:", repr(e))
 
-        # Fallback deterministic risk
-        score = min(
-            url_results.get("score", 0)
-            + heuristic_text_findings.get("score", 0)
+        fallback_score = min(
+            url_analysis.get("score", 0.0)
+            + heuristic_text_findings.get("score", 0.0)
             + text_ml_score,
             1.0
         )
 
         risk = {
-            "score": round(score, 2),
-            "verdict": "SUSPICIOUS" if score >= 0.5 else "SAFE",
-            "reasons": ["Fallback risk calculation used"]
+            "risk_score": int(fallback_score * 100),
+            "phishing_probability": round(fallback_score, 2),
+            "verdict": "SUSPICIOUS" if fallback_score >= 0.5 else "SAFE",
+            "explainability": ["Fallback risk calculation used"]
         }
 
     return success_response({
         "risk": risk,
         "nlp_analysis": nlp_result,
-        "url_analysis": url_results,
+        "url_analysis": url_analysis,
         "email_text_analysis": heuristic_text_findings,
         "malware_analysis": {
             "detected": bool(malware_hits),
