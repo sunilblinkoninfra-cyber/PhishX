@@ -2,30 +2,31 @@ import os
 from typing import List, Optional
 
 import requests
-from fastapi import FastAPI, Depends, HTTPException, Request, status
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 
 from utils.api_response import success_response, error_response
 from scanner.url_analyzer import analyze_urls
+from scanner.url_reputation import analyze_urls_reputation
 from scanner.email_analyzer import analyze_email_text as analyze_email_text_heuristics
 from scanner.attachment_scanner import scan_attachments
 from scanner.risk_engine import calculate_risk
 
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
 # App initialization
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
 
 app = FastAPI(
     title="PhishGuard Email Security API",
-    version="1.2.0",
-    description="API for phishing, malware, and email threat detection"
+    version="1.3.0",
+    description="Email phishing, malware, NLP, and threat intelligence detection API"
 )
 
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
 # Environment
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
 
 API_KEY = os.getenv("API_KEY")
 NLP_SERVICE_URL = os.getenv("NLP_SERVICE_URL")
@@ -35,27 +36,22 @@ if not API_KEY:
 
 print("NLP_SERVICE_URL =", NLP_SERVICE_URL)
 
-# -----------------------------------------------------------------------------
-# CORS (temporary – tighten later)
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# CORS
+# ------------------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -----------------------------------------------------------------------------
-# Auth
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Authentication
+# ------------------------------------------------------------------
 
-api_key_header = APIKeyHeader(
-    name="Authorization",
-    auto_error=False,
-    description="API key via Authorization header. Supports 'Bearer <key>' or raw key."
-)
+api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
 def authenticate(api_key: Optional[str] = Depends(api_key_header)):
     if not api_key:
@@ -69,26 +65,26 @@ def authenticate(api_key: Optional[str] = Depends(api_key_header)):
 
     return True
 
-# -----------------------------------------------------------------------------
-# Global exception handler
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Global error handler
+# ------------------------------------------------------------------
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     print("UNHANDLED_EXCEPTION:", repr(exc))
     return error_response("Internal server error", 500)
 
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
 # Health
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
 
 @app.get("/health")
-def health_check():
+def health():
     return success_response({"status": "ok"})
 
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
 # Schemas
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
 
 class Attachment(BaseModel):
     filename: str
@@ -101,13 +97,12 @@ class EmailScanRequest(BaseModel):
     urls: List[str] = []
     attachments: List[Attachment] = []
 
-# -----------------------------------------------------------------------------
-# NLP ML Client (SAFE)
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# NLP Client (unchanged, safe fallback)
+# ------------------------------------------------------------------
 
 def call_nlp_service(subject: str, body: str) -> dict:
     if not NLP_SERVICE_URL:
-        print("NLP_SERVICE_URL not set")
         return {
             "text_ml_score": 0.0,
             "signals": [],
@@ -121,12 +116,6 @@ def call_nlp_service(subject: str, body: str) -> dict:
             json={"subject": subject, "body": body},
             timeout=5
         )
-
-        print("NLP STATUS:", resp.status_code)
-        print("NLP BODY:", resp.text)
-
-        if resp.status_code != 200:
-            raise RuntimeError(f"NLP returned {resp.status_code}")
 
         data = resp.json()
 
@@ -146,67 +135,65 @@ def call_nlp_service(subject: str, body: str) -> dict:
             "available": False
         }
 
-# -----------------------------------------------------------------------------
-# Email scan (CORE ENDPOINT)
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Main scan endpoint
+# ------------------------------------------------------------------
 
 @app.post("/scan/email")
 def scan_email(
     payload: EmailScanRequest,
     _: bool = Depends(authenticate)
 ):
-    # --- URL ML analysis ---
+    # --------------------------------------------------------------
+    # URL analysis (heuristic)
+    # --------------------------------------------------------------
     url_analysis = analyze_urls(payload.urls or [])
 
-    # Normalize for legacy risk_engine
+    # Normalize legacy structure
     url_results = [
         {"risk": "high"} if url_analysis.get("score", 0) > 0 else {"risk": "low"}
     ]
 
-    # --- Heuristic text analysis ---
+    # --------------------------------------------------------------
+    # URL Threat Intelligence (NEW)
+    # --------------------------------------------------------------
+    url_reputation = analyze_urls_reputation(payload.urls or [])
+
+    # --------------------------------------------------------------
+    # Heuristic email analysis
+    # --------------------------------------------------------------
     heuristic_text_findings = analyze_email_text_heuristics(
         payload.subject,
         payload.body
     )
 
-    # --- NLP ML analysis ---
+    # --------------------------------------------------------------
+    # NLP ML
+    # --------------------------------------------------------------
     nlp_result = call_nlp_service(payload.subject, payload.body)
     text_ml_score = float(nlp_result.get("text_ml_score", 0.0))
 
-    # --- Attachment scanning ---
+    # --------------------------------------------------------------
+    # Attachment malware scan
+    # --------------------------------------------------------------
     malware_hits = scan_attachments(payload.attachments or [])
 
-    # --- Risk calculation ---
-    try:
-        risk = calculate_risk(
-            url_results=url_results,
-            text_findings=heuristic_text_findings,
-            malware_hits=malware_hits,
-            text_ml_score=text_ml_score,
-            url_ml_score=url_analysis.get("score", 0.0),
-            url_ml_signals=url_analysis.get("signals", [])
-        )
-    except Exception as e:
-        print("RISK_ENGINE_ERROR:", repr(e))
-
-        fallback_score = min(
-            url_analysis.get("score", 0.0)
-            + heuristic_text_findings.get("score", 0.0)
-            + text_ml_score,
-            1.0
-        )
-
-        risk = {
-            "risk_score": int(fallback_score * 100),
-            "phishing_probability": round(fallback_score, 2),
-            "verdict": "SUSPICIOUS" if fallback_score >= 0.5 else "SAFE",
-            "explainability": ["Fallback risk calculation used"]
-        }
+    # --------------------------------------------------------------
+    # Risk engine
+    # --------------------------------------------------------------
+    risk = calculate_risk(
+        url_results=url_results,
+        text_findings=heuristic_text_findings,
+        malware_hits=malware_hits,
+        text_ml_score=text_ml_score,
+        url_ml_score=url_reputation.get("score", 0.0),
+        url_ml_signals=url_reputation.get("signals", [])
+    )
 
     return success_response({
         "risk": risk,
         "nlp_analysis": nlp_result,
-        "url_analysis": url_analysis,
+        "url_analysis": url_reputation,
         "email_text_analysis": heuristic_text_findings,
         "malware_analysis": {
             "detected": bool(malware_hits),
