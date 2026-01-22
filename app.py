@@ -13,6 +13,7 @@ from scanner.url_reputation import analyze_urls_reputation
 from scanner.email_analyzer import analyze_email_text as analyze_email_text_heuristics
 from scanner.attachment_scanner import scan_attachments
 from scanner.risk_engine import calculate_risk
+from scanner.url_ml.url_ml_service import analyze_urls_ml
 
 # --------------------------------------------------
 # App init
@@ -155,7 +156,7 @@ def scan_email(payload: EmailScanRequest, _: bool = Depends(authenticate)):
     ]
 
     # URL reputation / ML
-    url_reputation = analyze_urls_reputation(payload.urls or []) or {}
+    url_reputation = analyze_urls_ml(payload.urls or [])
     url_ml_score = float(url_reputation.get("score", 0.0))
     url_ml_signals = url_reputation.get("signals", [])
 
