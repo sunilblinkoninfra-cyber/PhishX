@@ -145,7 +145,7 @@ def call_nlp_service(subject: str, body: str) -> dict:
 # --------------------------------------------------
 
 @app.post("/scan/email")
-def scan_email(payload: EmailScanRequest, _: bool = Depends(authenticate)):
+def scan_email(payload: EmailScanRequest):
     # ---------------- URL ML v2 (LOCAL) ----------------
     url_result = analyze_urls(payload.urls or [])
 
