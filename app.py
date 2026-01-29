@@ -348,95 +348,89 @@ def persist_decision(email_id, risk_score, category, decision, findings):
 # Inline ingest endpoint (PHASE 5 AUTHORITATIVE)
 # --------------------------------------------------
 
-@app.post(
-    "/ingest/email",
-    response_model=EmailDecisionResponse,
-    dependencies=[Depends(authenticate)]
-)
+@app.post("/ingest/email")
 def ingest_email(
-    payload: EmailScanRequest = Body(...),
-    request: Request = None
+    payload: EmailIngestRequest,
+    tenant_id: str = Depends(resolve_tenant),
+    db=Depends(get_db),
 ):
-    tenant_id = get_tenant_id(request)
-    email_id = str(uuid.uuid4())
-
-    # 0️⃣ Blocklist hard stop
-    blocked, reason = is_blocked(
-        tenant_id,
-        payload.sender,
-        payload.urls or []
-    )
-
-    if blocked:
-        findings = {"block_reason": reason}
-        persist_decision(
-            email_id,
-            100,
-            EmailCategory.HOT,
-            Decision.QUARANTINE,
-            findings
-        )
-        return EmailDecisionResponse(
-            email_id=email_id,
-            risk_score=100,
-            category=EmailCategory.HOT,
-            decision=Decision.QUARANTINE,
-            findings=findings
-        )
-
-    # 1️⃣ Resolve tenant policy
-    policy = get_active_policy(tenant_id)
-
-    # 2️⃣ Analysis
-    url_result = analyze_urls(payload.urls or [])
-    text_heuristic = analyze_email_text_heuristics(payload.subject, payload.body)
-    nlp_result = call_nlp_service(payload.subject, payload.body)
-
     try:
-        malware_hits = scan_attachments(payload.attachments or [])
-    except Exception:
+        # 1️⃣ Resolve tenant policy (safe defaults)
+        policy = get_tenant_policy(db, tenant_id)
+        if not policy:
+            policy = {
+                "cold": 40,
+                "warm": 75,
+                "hot": 90,
+                "weights": {
+                    "nlp": 1.0,
+                    "url": 1.0,
+                    "attachment": 1.0,
+                    "reputation": 1.0,
+                },
+            }
+
+        # 2️⃣ NLP (safe)
+        nlp_result = call_nlp_service(payload.subject, payload.body)
+        text_ml_score = float(nlp_result.get("text_ml_score", 0))
+
+        # 3️⃣ URL analysis (safe)
+        url_result = analyze_urls(payload.urls) if payload.urls else []
+
+        # 4️⃣ Attachment scan placeholder
         malware_hits = []
 
-    # 3️⃣ Weighted risk
-   risk_eval = calculate_risk(
-    text_ml_score=nlp_result.get("text_ml_score", 0.0),
-    text_findings=text_heuristic,
-    url_result=url_result,
-    malware_hits=malware_hits,
-)
+        # 5️⃣ Calculate risk (STRUCTURED)
+        risk_eval = calculate_risk(
+            text_ml_score=text_ml_score,
+            text_findings={},
+            url_result=url_result,
+            malware_hits=malware_hits,
+        )
 
-# 🔐 HARD GUARANTEE: risk_score is ALWAYS an int
-risk_score = int(
-    risk_eval["risk_score"]
-    if isinstance(risk_eval, dict)
-    else risk_eval
-)
+        # 🔐 NORMALIZE TO INT (CRITICAL)
+        risk_score = int(
+            risk_eval["risk_score"]
+            if isinstance(risk_eval, dict)
+            else risk_eval
+        )
 
-    # 4️⃣ Policy thresholds
-    if risk_score >= policy["warm"]:
-        category, decision = EmailCategory.HOT, Decision.QUARANTINE
-    elif risk_score >= policy["cold"]:
-        category, decision = EmailCategory.WARM, Decision.ALLOW
-    else:
-        category, decision = EmailCategory.COLD, Decision.ALLOW
+        # 6️⃣ Decision logic (ORDER MATTERS)
+        if risk_score >= policy["warm"]:
+            category = EmailCategory.HOT
+            decision = Decision.QUARANTINE
+        elif risk_score >= policy["cold"]:
+            category = EmailCategory.WARM
+            decision = Decision.ALLOW
+        else:
+            category = EmailCategory.COLD
+            decision = Decision.ALLOW
 
-    findings = {
-        "policy": policy,
-        "nlp": nlp_result,
-        "urls": url_result,
-        "email_text": text_heuristic,
-        "malware": malware_hits
-    }
+        # 7️⃣ Persist decision
+        email_id = persist_decision(
+            db=db,
+            tenant_id=tenant_id,
+            payload=payload,
+            risk_score=risk_score,
+            category=category,
+            decision=decision,
+            findings=risk_eval.get("findings", {}),
+        )
 
-    persist_decision(email_id, risk_score, category, decision, findings)
+        return {
+            "email_id": email_id,
+            "risk_score": risk_score,
+            "category": category,
+            "decision": decision,
+            "findings": risk_eval.get("findings", {}),
+        }
 
-    return EmailDecisionResponse(
-        email_id=email_id,
-        risk_score=risk_score,
-        category=category,
-        decision=decision,
-        findings=findings
-    )
+    except Exception as exc:
+        # ❌ NEVER return dicts here
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
 
 # --------------------------------------------------
 # Phase 6 — SMTP Enforcement Endpoint
