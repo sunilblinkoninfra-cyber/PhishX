@@ -9,6 +9,7 @@ from fastapi import FastAPI, Depends, HTTPException, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from fastapi import Request
+from fastapi import Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -41,6 +42,21 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
             "message": "Internal server error"
         }
     )
+
+def resolve_tenant(
+    x_tenant_id: str = Header(..., alias="X-Tenant-ID")
+) -> str:
+    """
+    Resolves and validates tenant context.
+    This is a HARD requirement for all tenant-aware endpoints.
+    """
+    if not x_tenant_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Tenant-ID header is required"
+        )
+
+    return x_tenant_id
 
 # --------------------------------------------------
 # Environment
