@@ -5,7 +5,7 @@ from typing import List, Optional
 from enum import Enum
 
 import requests
-from fastapi import FastAPI, Depends, HTTPException, Request, Header, Body
+from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from fastapi.responses import JSONResponse
@@ -18,7 +18,6 @@ from models.soc import (
     ReleaseQuarantineRequest,
 )
 
-# Scanners
 from scanner.url_ml_v2 import analyze_urls
 from scanner.risk_engine import calculate_risk
 
@@ -34,7 +33,7 @@ app = FastAPI(
 )
 
 # --------------------------------------------------
-# GLOBAL EXCEPTION HANDLER (ONLY ONE)
+# GLOBAL EXCEPTION HANDLER (ONE ONLY)
 # --------------------------------------------------
 
 @app.exception_handler(Exception)
@@ -67,7 +66,7 @@ app.add_middleware(
 )
 
 # --------------------------------------------------
-# Auth
+# Auth (FIXED)
 # --------------------------------------------------
 
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
@@ -75,10 +74,18 @@ api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 def authenticate(api_key: Optional[str] = Depends(api_key_header)):
     if not api_key:
         raise HTTPException(status_code=401, detail="Missing API key")
+
+    api_key = api_key.strip()
+
+    # Accept both:
+    # Authorization: my-key
+    # Authorization: Bearer my-key
     if api_key.lower().startswith("bearer "):
         api_key = api_key.split(" ", 1)[1].strip()
+
     if api_key != API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API key")
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
     return True
 
 # --------------------------------------------------
@@ -123,7 +130,7 @@ class EmailIngestRequest(BaseModel):
     attachments: List[Attachment] = []
 
 # --------------------------------------------------
-# Tenant Policy (SAFE)
+# Tenant Policy
 # --------------------------------------------------
 
 def get_active_policy(tenant_id: str):
@@ -146,12 +153,12 @@ def get_active_policy(tenant_id: str):
         return {"cold": 40, "warm": 75}
 
     return {
-        "cold": row["cold_threshold"],
-        "warm": row["warm_threshold"],
+        "cold": int(row["cold_threshold"]),
+        "warm": int(row["warm_threshold"]),
     }
 
 # --------------------------------------------------
-# NLP (SAFE)
+# NLP
 # --------------------------------------------------
 
 def call_nlp_service(subject: str, body: str) -> dict:
@@ -211,7 +218,7 @@ def persist_decision(
     conn.close()
 
 # --------------------------------------------------
-# INGEST ENDPOINT (AUTHORITATIVE)
+# INGEST ENDPOINT (FIXED)
 # --------------------------------------------------
 
 @app.post("/ingest/email", dependencies=[Depends(authenticate)])
@@ -222,7 +229,7 @@ def ingest_email(
     policy = get_active_policy(tenant_id)
 
     nlp = call_nlp_service(payload.subject, payload.body)
-    text_score = float(nlp.get("text_ml_score", 0))
+    text_score = float(nlp.get("text_ml_score", 0.0))
 
     url_result = analyze_urls(payload.urls) if payload.urls else []
 
@@ -233,7 +240,7 @@ def ingest_email(
         malware_hits=[],
     )
 
-    # 🔒 HARD NORMALIZATION (FIXES YOUR ERROR)
+    # ✅ HARD NORMALIZATION (CRITICAL FIX)
     if isinstance(risk_eval, dict):
         risk_score = int(risk_eval.get("risk_score", 0))
         findings = risk_eval.get("findings", {})
@@ -263,7 +270,7 @@ def ingest_email(
     }
 
 # --------------------------------------------------
-# Phase 6 — SMTP Enforcement
+# SMTP Enforcement
 # --------------------------------------------------
 
 @app.post("/enforce/smtp", dependencies=[Depends(authenticate)])
@@ -285,7 +292,7 @@ def enforce_smtp(payload: dict):
     return {"smtp_code": 250, "message": "Accepted"}
 
 # --------------------------------------------------
-# Phase 6 — Graph Enforcement
+# Graph Enforcement
 # --------------------------------------------------
 
 @app.post("/enforce/graph", dependencies=[Depends(authenticate)])
@@ -303,7 +310,7 @@ def enforce_graph(payload: dict):
     return {"status": "processed"}
 
 # --------------------------------------------------
-# Phase 4 — SOC Actions (UNCHANGED)
+# SOC Actions (UNCHANGED)
 # --------------------------------------------------
 
 @app.post("/soc/false-positive", dependencies=[Depends(authenticate)])
