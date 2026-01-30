@@ -128,7 +128,7 @@ class Attachment(BaseModel):
     filename: str
     base64: str
 
-class EmailScanRequest(BaseModel):
+class EmailIngestRequest(BaseModel):
     subject: str
     sender: str
     body: str
