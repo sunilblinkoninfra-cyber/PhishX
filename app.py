@@ -228,6 +228,11 @@ def ingest_email(
 ):
     policy = get_active_policy(tenant_id)
 
+    required_keys = {"cold_threshold", "warm_threshold"}
+    missing = required_keys - policy.keys()
+    if missing:
+        raise RuntimeError(f"Invalid policy config, missing: {missing}")
+
     nlp = call_nlp_service(payload.subject, payload.body)
     text_score = float(nlp.get("text_ml_score", 0.0))
 
@@ -240,7 +245,7 @@ def ingest_email(
         malware_hits=[],
     )
 
-    # ✅ HARD NORMALIZATION (CRITICAL FIX)
+    # HARD NORMALIZATION
     if isinstance(risk_eval, dict):
         risk_score = int(risk_eval.get("risk_score", 0))
         findings = risk_eval.get("findings", {})
@@ -248,10 +253,13 @@ def ingest_email(
         risk_score = int(risk_eval)
         findings = {}
 
-    if risk_score >= policy["warm"]:
+    cold_threshold = int(policy["cold_threshold"])
+    warm_threshold = int(policy["warm_threshold"])
+
+    if risk_score >= warm_threshold:
         category = EmailCategory.HOT
         decision = Decision.QUARANTINE
-    elif risk_score >= policy["cold"]:
+    elif risk_score >= cold_threshold:
         category = EmailCategory.WARM
         decision = Decision.ALLOW
     else:
