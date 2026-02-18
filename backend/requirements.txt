@@ -1,0 +1,55 @@
+numpy
+pandas
+scikit-learn
+joblib
+regex
+
+# Web Framework & APIs
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.28.0
+python-multipart>=0.0.7
+pydantic>=2.5,<3.0
+pydantic[email]>=2.5
+annotated-types
+
+# Message Queue & Task Processing
+redis>=5.0.0
+celery>=5.3.0
+rq>=1.15.0
+
+# Logging & Observability
+structlog>=24.1.0
+python-json-logger>=2.0.7
+prometheus-client>=0.19.0
+
+# Rate Limiting & Security
+slowapi>=0.1.9
+email-validator>=2.1.0
+
+# HTTP & External Services
+requests>=2.31.0
+httpx>=0.25.0
+
+# Authentication & Encryption
+jinja2>=3.1.0
+python-jose[cryptography]>=3.3.0
+PyJWT>=2.8.0
+cryptography>=41.0.0
+bcrypt>=4.1.0
+passlib[bcrypt]>=1.7.4
+
+# Email & File Scanning
+clamd>=1.0.2
+python-magic>=0.4.27
+tldextract>=5.1.0
+
+# Celery Beat scheduler (optional integration)
+django-celery-beat>=2.4.0
+
+# Database
+psycopg2-binary>=2.9.0
+sqlalchemy>=2.0.0
+
+# Environment & Config
+python-dotenv>=1.0.0
+

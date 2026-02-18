@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Phishing Detection Tool</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<h2>Phishing Detection Scanner</h2>
+
+<input id="subject" placeholder="Subject" /><br><br>
+
+<textarea id="body" placeholder="Email body"></textarea><br><br>
+
+<input id="urls" placeholder="URLs (optional)" /><br><br>
+
+<button onclick="scan()">Scan Email</button>
+
+<pre id="result"></pre>
+
+<script>
+async function scan() {
+    const response = await fetch("/scan", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "X-API-Key": "demo-key-123"
+        },
+        body: JSON.stringify({
+            subject: document.getElementById("subject").value,
+            body: document.getElementById("body").value,
+            urls: document.getElementById("urls").value
+        })
+    });
+
+    const data = await response.json();
+    document.getElementById("result").textContent =
+        JSON.stringify(data, null, 2);
+}
+</script>
+
+</body>
+</html>

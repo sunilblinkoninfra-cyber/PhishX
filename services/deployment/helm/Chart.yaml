@@ -1,0 +1,29 @@
+apiVersion: v2
+name: guardstone-console
+description: Guardstone Console - Phishing Detection and Response SOC Dashboard
+type: application
+
+version: 1.0.0
+appVersion: "1.0.0"
+
+keywords:
+  - guardstone
+  - phishing
+  - detection
+  - soc
+  - security
+  - dashboard
+
+home: https://guardstone.example.com
+sources:
+  - https://github.com/guardstone/console
+
+maintainers:
+  - name: Guardstone Team
+    email: team@guardstone.local
+
+dependencies: []
+
+annotations:
+  category: Security
+  licenses: MIT

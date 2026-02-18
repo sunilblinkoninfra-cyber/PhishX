@@ -1,0 +1,8 @@
+{
+    "python.analysis.diagnosticSeverityOverrides": {
+
+    },
+    "python.analysis.typeCheckingMode": "standard",
+    "claudeCodeChat.permissions.yoloMode": true,
+    "chatgpt.openOnStartup": true
+}

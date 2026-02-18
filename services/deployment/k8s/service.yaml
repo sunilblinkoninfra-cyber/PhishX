@@ -1,0 +1,55 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: guardstone-console
+  namespace: default
+  labels:
+    app: guardstone-console
+    component: frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: guardstone-console
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: guardstone-console
+  namespace: default
+  labels:
+    app: guardstone-console
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: guardstone-console
+  labels:
+    app: guardstone-console
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: guardstone-console
+  labels:
+    app: guardstone-console
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardstone-console
+subjects:
+- kind: ServiceAccount
+  name: guardstone-console
+  namespace: default

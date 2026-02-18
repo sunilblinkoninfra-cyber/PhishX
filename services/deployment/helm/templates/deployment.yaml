@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "guardstone-console.fullname" . }}
+  labels:
+    {{- include "guardstone-console.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "guardstone-console.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "guardstone-console.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "guardstone-console.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      
+      containers:
+      - name: {{ .Chart.Name }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        
+        ports:
+        - name: http
+          containerPort: 3000
+          protocol: TCP
+        
+        env:
+        - name: NODE_ENV
+          value: "{{ .Values.environment.name }}"
+        - name: NEXT_PUBLIC_ENVIRONMENT
+          value: "{{ .Values.environment.name }}"
+        - name: NEXT_PUBLIC_APP_VERSION
+          value: "{{ .Chart.AppVersion }}"
+        - name: NEXT_PUBLIC_ENABLE_ANALYTICS
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "guardstone-console.fullname" . }}-config
+              key: analytics-enabled
+        - name: API_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "guardstone-console.fullname" . }}-config
+              key: api-base-url
+        {{- if .Values.secrets.sentryDsn }}
+        - name: NEXT_PUBLIC_SENTRY_DSN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "guardstone-console.fullname" . }}-secrets
+              key: sentry-dsn
+              optional: true
+        {{- end }}
+        
+        {{- with .Values.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        
+        {{- with .Values.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        
+        resources:
+          {{- toYaml .Values.resources | nindent 12 }}
+        
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: next-cache
+          mountPath: /.next
+      
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: next-cache
+        emptyDir: {}
+      
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

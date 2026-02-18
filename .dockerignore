@@ -4,3 +4,23 @@ __pycache__/
 .git/
 .env
 *.pyc
+
+# Non-backend projects / large contexts
+frontend/
+guardstone-console/
+services/deployment/helm/
+services/deployment/k8s/
+backend/data/
+backend/url_ml_training/
+
+# Runtime artifacts
+backend/logs/
+backend/quarantine/
+backend/attachments/
+
+# Local docs and generated files
+*.md
+*.docx
+*.txt
+generated_secrets.txt
+!backend/requirements.txt

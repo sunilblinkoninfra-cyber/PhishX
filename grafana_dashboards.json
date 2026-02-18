@@ -1,0 +1,531 @@
+{
+  "version": "1.0",
+  "dashboards": [
+    {
+      "id": "phishx_overview",
+      "title": "PhishX System Overview",
+      "description": "High-level system health and performance metrics",
+      "panels": [
+        {
+          "id": 1,
+          "title": "API Request Rate",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "rate(api_requests_total[5m])",
+              "legendFormat": "{{endpoint}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "yaxes": [
+            {"format": "short", "label": "Requests/sec"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "API Response Time (p95)",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, rate(api_request_duration_seconds_bucket[5m]))",
+              "legendFormat": "{{endpoint}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "yaxes": [
+            {"format": "s", "label": "Response Time"}
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Email Processing Decisions",
+          "type": "stat",
+          "targets": [
+            {
+              "expr": "sum(increase(email_decisions_total[1h])) by (decision)"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+          "colorMode": "value"
+        },
+        {
+          "id": 4,
+          "title": "Queue Depth by Type",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "queue_depth_current",
+              "legendFormat": "{{queue_name}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+          "yaxes": [
+            {"format": "short", "label": "Task Count"}
+          ]
+        },
+        {
+          "id": 5,
+          "title": "Worker Active Tasks",
+          "type": "gauge",
+          "targets": [
+            {
+              "expr": "worker_active_tasks"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+          "thresholds": "0,10,20"
+        },
+        {
+          "id": 6,
+          "title": "External Service Availability",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "external_service_availability_percent",
+              "legendFormat": "{{service}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+          "yaxes": [
+            {"format": "percent", "label": "Availability", "min": 0, "max": 100}
+          ]
+        },
+        {
+          "id": 7,
+          "title": "Circuit Breaker Status",
+          "type": "stat",
+          "targets": [
+            {
+              "expr": "sum by (breaker_name, state) (circuit_breaker_state)",
+              "legendFormat": "{{breaker_name}}: {{state}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "colorMode": "background"
+        }
+      ]
+    },
+    {
+      "id": "phishx_security",
+      "title": "PhishX Security Metrics",
+      "description": "Security events, rate limiting, and authentication metrics",
+      "panels": [
+        {
+          "id": 1,
+          "title": "Rate Limit Violations (per minute)",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "rate(rate_limit_exceeded_total[1m])",
+              "legendFormat": "{{limiter_type}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "yaxes": [
+            {"format": "short", "label": "Violations/min"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Authentication Failures (per minute)",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "rate(authentication_failures_total[1m])",
+              "legendFormat": "{{auth_type}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "yaxes": [
+            {"format": "short", "label": "Failures/min"}
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Rate Limits Hit by Type",
+          "type": "piechart",
+          "targets": [
+            {
+              "expr": "sum(increase(rate_limit_exceeded_total[1h])) by (limiter_type)"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+        },
+        {
+          "id": 4,
+          "title": "Suspicious Request Patterns Detected",
+          "type": "stat",
+          "targets": [
+            {
+              "expr": "sum(increase(suspicious_requests_detected_total[1h]))"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "textMode": "auto"
+        },
+        {
+          "id": 5,
+          "title": "Authentication Failure Details",
+          "type": "table",
+          "targets": [
+            {
+              "expr": "topk(10, sum(increase(authentication_failures_total[1h])) by (auth_type, reason))"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {},
+                "indexByName": {}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "phishx_queues",
+      "title": "PhishX Queue Performance",
+      "description": "Message queue depth, throughput, and processing times",
+      "panels": [
+        {
+          "id": 1,
+          "title": "Queue Depth Trend (all queues)",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "sum(queue_depth_current) by (queue_name)",
+              "legendFormat": "{{queue_name}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "yaxes": [
+            {"format": "short", "label": "Pending Tasks"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Queue Processing Time (p95)",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, rate(queue_processing_time_seconds_bucket[5m]))",
+              "legendFormat": "{{queue_name}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "yaxes": [
+            {"format": "s", "label": "Processing Time"}
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Task Processing Rate (per queue)",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "sum(rate(queue_tasks_total[5m])) by (queue_name, status)",
+              "legendFormat": "{{queue_name}}: {{status}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "yaxes": [
+            {"format": "short", "label": "Tasks/sec"}
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Worker Task Distribution",
+          "type": "piechart",
+          "targets": [
+            {
+              "expr": "sum(worker_active_tasks) by (worker_name)"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+        },
+        {
+          "id": 5,
+          "title": "Queue Warnings (>1000 depth)",
+          "type": "alert",
+          "gridPos": {"h": 4, "w": 24, "x": 0, "y": 16},
+          "alert": {
+            "conditions": [
+              {
+                "evaluator": {"params": [1000], "type": "gt"},
+                "operator": {"type": "and"},
+                "query": {"params": ["A", "5m", "now"]},
+                "reducer": {"params": [], "type": "max"},
+                "type": "query"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "phishx_external",
+      "title": "PhishX External Services",
+      "description": "External service health, latency, and circuit breaker status",
+      "panels": [
+        {
+          "id": 1,
+          "title": "Service Availability Status",
+          "type": "stat",
+          "targets": [
+            {
+              "expr": "external_service_availability_percent",
+              "legendFormat": "{{service}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+          "colorMode": "background",
+          "thresholds": "80,95"
+        },
+        {
+          "id": 2,
+          "title": "NLP Service Latency (p99)",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, rate(external_service_latency_seconds_bucket{service='nlp'}[5m]))",
+              "legendFormat": "NLP Service"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+          "yaxes": [
+            {"format": "s", "label": "Latency"}
+          ]
+        },
+        {
+          "id": 3,
+          "title": "ClamAV Service Latency (p99)",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, rate(external_service_latency_seconds_bucket{service='clamav'}[5m]))",
+              "legendFormat": "ClamAV Service"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+          "yaxes": [
+            {"format": "s", "label": "Latency"}
+          ]
+        },
+        {
+          "id": 4,
+          "title": "External Service Call Rate",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "sum(rate(external_service_calls_total[5m])) by (service, status)",
+              "legendFormat": "{{service}}: {{status}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "yaxes": [
+            {"format": "short", "label": "Calls/sec"}
+          ]
+        },
+        {
+          "id": 5,
+          "title": "Circuit Breaker States",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "circuit_breaker_state",
+              "legendFormat": "{{breaker_name}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "yaxes": [
+            {"format": "short", "label": "State (0=CLOSED, 1=OPEN, 2=HALF_OPEN)"}
+          ]
+        },
+        {
+          "id": 6,
+          "title": "Circuit Breaker Metrics",
+          "type": "table",
+          "targets": [
+            {
+              "expr": "circuit_breaker_success_rate"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16}
+        }
+      ]
+    },
+    {
+      "id": "phishx_database",
+      "title": "PhishX Database Performance",
+      "description": "Database query performance, connection pool, and throughput",
+      "panels": [
+        {
+          "id": 1,
+          "title": "Query Latency (p95)",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, rate(database_query_duration_seconds_bucket[5m]))",
+              "legendFormat": "{{query_type}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "yaxes": [
+            {"format": "s", "label": "Query Time"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Query Latency (p99)",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, rate(database_query_duration_seconds_bucket[5m]))",
+              "legendFormat": "{{query_type}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "yaxes": [
+            {"format": "s", "label": "Query Time"}
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Connection Pool Utilization",
+          "type": "gauge",
+          "targets": [
+            {
+              "expr": "(database_connection_pool_active / database_connection_pool_size) * 100"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+          "thresholds": "50,80"
+        },
+        {
+          "id": 4,
+          "title": "Connection Pool Status",
+          "type": "stat",
+          "targets": [
+            {
+              "expr": "database_connection_pool_active",
+              "legendFormat": "Active Connections"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+          "colorMode": "value"
+        },
+        {
+          "id": 5,
+          "title": "Query Rate",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "sum(rate(database_queries_total[5m])) by (query_type, status)",
+              "legendFormat": "{{query_type}}: {{status}}"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+          "yaxes": [
+            {"format": "short", "label": "Queries/sec"}
+          ]
+        },
+        {
+          "id": 6,
+          "title": "Database Errors (last hour)",
+          "type": "stat",
+          "targets": [
+            {
+              "expr": "sum(increase(database_errors_total[1h])) by (error_type)"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+          "colorMode": "background"
+        }
+      ]
+    },
+    {
+      "id": "phishx_email",
+      "title": "PhishX Email Analysis",
+      "description": "Email decision metrics, risk scores, and categorization",
+      "panels": [
+        {
+          "id": 1,
+          "title": "Emails Processed (per hour)",
+          "type": "stat",
+          "targets": [
+            {
+              "expr": "sum(increase(email_decisions_total[1h]))"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+          "colorMode": "value"
+        },
+        {
+          "id": 2,
+          "title": "Decision Distribution",
+          "type": "piechart",
+          "targets": [
+            {
+              "expr": "sum(increase(email_decisions_total[1h])) by (decision)"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0}
+        },
+        {
+          "id": 3,
+          "title": "Risk Category Distribution",
+          "type": "piechart",
+          "targets": [
+            {
+              "expr": "sum(increase(email_decisions_total[1h])) by (category)"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0}
+        },
+        {
+          "id": 4,
+          "title": "Email Processing Time (p95)",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, rate(email_processing_duration_seconds_bucket[5m]))"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "yaxes": [
+            {"format": "s", "label": "Processing Time"}
+          ]
+        },
+        {
+          "id": 5,
+          "title": "Average Risk Score Trend",
+          "type": "graph",
+          "targets": [
+            {
+              "expr": "avg(email_risk_score) over (5m)"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "yaxes": [
+            {"format": "short", "label": "Risk Score (0-100)"}
+          ]
+        },
+        {
+          "id": 6,
+          "title": "URLs Analyzed per Email",
+          "type": "stat",
+          "targets": [
+            {
+              "expr": "avg(email_urls_per_message)"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+          "colorMode": "value"
+        }
+      ]
+    }
+  ]
+}

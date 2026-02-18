@@ -1,18 +1,398 @@
 services:
-  phishing-api:
-    build: .
-    container_name: phishing-api
-    ports:
-      - "8000:8000"
-    environment:
-      - API_KEY=my-secret-key
-      - CLAMAV_HOST=clamav
-      - CLAMAV_PORT=3310
-    depends_on:
-      - clamav
+  # ========================================
+  # Core Infrastructure
+  # ========================================
 
+  # PostgreSQL Database (Primary)
+  postgres:
+    image: postgres:15-alpine
+    container_name: phishx-postgres
+    environment:
+      POSTGRES_USER: phishx
+      POSTGRES_PASSWORD: phishx_secure_password
+      POSTGRES_DB: phishx_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U phishx"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - phishx-network
+    restart: unless-stopped
+
+  # Redis (Message Queue + Cache)
+  redis:
+    image: redis:7-alpine
+    container_name: phishx-redis
+    command: redis-server --appendonly yes --requirepass redis_secure_password
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis_secure_password", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - phishx-network
+    restart: unless-stopped
+
+  # ClamAV (Malware Scanning)
   clamav:
-    image: mkodockx/docker-clamav:alpine
-    container_name: clamav
+    image: clamav/clamav:1.4
+    container_name: phishx-clamav
     ports:
       - "3310:3310"
+    volumes:
+      - clamav_data:/var/lib/clamav
+    # Use image default healthcheck (clamdcheck.sh)
+    networks:
+      - phishx-network
+    restart: unless-stopped
+
+  # ========================================
+  # Application Services
+  # ========================================
+
+  # API Gateway (FastAPI)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: phishx-api
+    environment:
+      # Database
+      DATABASE_URL: postgresql://phishx:phishx_secure_password@postgres:5432/phishx_db
+      
+      # Redis & Message Queue
+      REDIS_URL: redis://:redis_secure_password@redis:6379/0
+      CELERY_BROKER_URL: redis://:redis_secure_password@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:redis_secure_password@redis:6379/2
+      
+      # Security
+      API_KEY: ${API_KEY:-change-me-in-production}
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      
+      # External Services
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: 3310
+      NLP_SERVICE_URL: ${NLP_SERVICE_URL:-http://nlp:8001/predict}
+      
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: json
+      LOG_OUTPUT: both
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      
+      # Service
+      PORT: 8000
+      WORKERS: 4
+      
+      # ========================================
+      # Phase 3: JWT Authentication
+      # ========================================
+      ENABLE_JWT_AUTH: ${ENABLE_JWT_AUTH:-false}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-your-secret-key-change-in-production}
+      JWT_ACCESS_TOKEN_EXPIRE: ${JWT_ACCESS_TOKEN_EXPIRE:-15}
+      JWT_REFRESH_TOKEN_EXPIRE: ${JWT_REFRESH_TOKEN_EXPIRE:-30}
+      
+      # ========================================
+      # Phase 3: Database Encryption
+      # ========================================
+      ENCRYPTION_ENABLED: ${ENCRYPTION_ENABLED:-false}
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:-}
+      KEY_ROTATION_INTERVAL: ${KEY_ROTATION_INTERVAL:-90}
+      
+      # ========================================
+      # Phase 3: Anomaly Detection
+      # ========================================
+      ANOMALY_DETECTION_ENABLED: ${ANOMALY_DETECTION_ENABLED:-true}
+      ANOMALY_CONFIDENCE_THRESHOLD: ${ANOMALY_CONFIDENCE_THRESHOLD:-0.8}
+      ANOMALY_ALERT_ON_DETECTION: ${ANOMALY_ALERT_ON_DETECTION:-true}
+      ANOMALY_SLIDING_WINDOW_SIZE: ${ANOMALY_SLIDING_WINDOW_SIZE:-1000}
+      ANOMALY_ZSCORE_THRESHOLD: ${ANOMALY_ZSCORE_THRESHOLD:-3.0}
+      
+      # ========================================
+      # Phase 3: Shadow Models
+      # ========================================
+      SHADOW_MODELS_ENABLED: ${SHADOW_MODELS_ENABLED:-false}
+      CANARY_STRATEGY: ${CANARY_STRATEGY:-linear}
+      
+      # ========================================
+      # Phase 3: Multi-Region
+      # ========================================
+      MULTI_REGION_ENABLED: ${MULTI_REGION_ENABLED:-false}
+      PRIMARY_REGION: ${PRIMARY_REGION:-us-east-1}
+      SECONDARY_REGION: ${SECONDARY_REGION:-eu-west-1}
+      FAILOVER_THRESHOLD_SECONDS: ${FAILOVER_THRESHOLD_SECONDS:-60}
+    
+    ports:
+      - "8000:8000"
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # clamav dependency removed for local/dev startup (scanner optional)
+    
+    volumes:
+      - ./backend/logs:/app/backend/logs
+      - ./backend/models:/app/backend/models
+      - ./backend/quarantine:/app/backend/quarantine
+    
+    networks:
+      - phishx-network
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Celery Worker - Email Processing (High Priority)
+  celery-worker-priority:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: phishx-celery-priority
+    command: celery -A tasks worker -Q high_priority,emails -c 4 -l info --soft-time-limit=30 --time-limit=60
+    environment:
+      DATABASE_URL: postgresql://phishx:phishx_secure_password@postgres:5432/phishx_db
+      REDIS_URL: redis://:redis_secure_password@redis:6379/0
+      CELERY_BROKER_URL: redis://:redis_secure_password@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:redis_secure_password@redis:6379/2
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: 3310
+      LOG_LEVEL: INFO
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # clamav dependency removed for local/dev startup (scanner optional)
+    
+    volumes:
+      - ./backend/logs:/app/backend/logs
+      - ./backend/models:/app/backend/models
+    
+    networks:
+      - phishx-network
+    
+    restart: unless-stopped
+
+  # Celery Worker - Enrichment (NLP, URL Analysis)
+  celery-worker-enrichment:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A tasks worker -Q enrichment -c 2 -l info --soft-time-limit=25 --time-limit=50
+    container_name: phishx-celery-enrichment
+    environment:
+      DATABASE_URL: postgresql://phishx:phishx_secure_password@postgres:5432/phishx_db
+      REDIS_URL: redis://:redis_secure_password@redis:6379/0
+      CELERY_BROKER_URL: redis://:redis_secure_password@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:redis_secure_password@redis:6379/2
+      NLP_SERVICE_URL: ${NLP_SERVICE_URL:-http://nlp:8001/predict}
+      LOG_LEVEL: INFO
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    
+    volumes:
+      - ./backend/logs:/app/backend/logs
+      - ./backend/models:/app/backend/models
+    
+    networks:
+      - phishx-network
+    
+    restart: unless-stopped
+
+  # Celery Worker - Enforcement (SMTP, Graph, Callbacks)
+  celery-worker-enforcement:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A tasks worker -Q enforcement -c 2 -l info --soft-time-limit=20 --time-limit=40
+    container_name: phishx-celery-enforcement
+    environment:
+      DATABASE_URL: postgresql://phishx:phishx_secure_password@postgres:5432/phishx_db
+      REDIS_URL: redis://:redis_secure_password@redis:6379/0
+      CELERY_BROKER_URL: redis://:redis_secure_password@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:redis_secure_password@redis:6379/2
+      LOG_LEVEL: INFO
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    
+    volumes:
+      - ./backend/logs:/app/backend/logs
+    
+    networks:
+      - phishx-network
+    
+    restart: unless-stopped
+
+  # Celery Beat (Scheduled Tasks)
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A tasks beat -l info
+    container_name: phishx-celery-beat
+    environment:
+      DATABASE_URL: postgresql://phishx:phishx_secure_password@postgres:5432/phishx_db
+      REDIS_URL: redis://:redis_secure_password@redis:6379/0
+      CELERY_BROKER_URL: redis://:redis_secure_password@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:redis_secure_password@redis:6379/2
+      LOG_LEVEL: INFO
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    
+    volumes:
+      - ./backend/logs:/app/backend/logs
+    
+    networks:
+      - phishx-network
+    
+    restart: unless-stopped
+
+  # ========================================
+  # Monitoring & Observability (Phase 2)
+  # ========================================
+
+  # Prometheus (Metrics Collection)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: phishx-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - phishx-network
+    depends_on:
+      - api
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Grafana (Visualization & Dashboards)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: phishx-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ALLOW_EMBED_INITIATION: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: "grafana-worldmap-panel,grafana-piechart-panel"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana_dashboards.json:/etc/grafana/provisioning/dashboards/phishx.json:ro
+    networks:
+      - phishx-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ========================================
+  # Optional Services (Development)
+  # ========================================
+
+  # Redis Commander (Development Only)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: phishx-redis-commander
+    environment:
+      REDIS_HOSTS: default:redis:6379:2:redis_secure_password
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - phishx-network
+    profiles:
+      - debug
+    restart: unless-stopped
+
+  # PgAdmin (Development Only)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: phishx-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@phishx.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - phishx-network
+    profiles:
+      - debug
+    restart: unless-stopped
+
+# ========================================
+# Volumes
+# ========================================
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  clamav_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# ========================================
+# Networks
+# ========================================
+
+networks:
+  phishx-network:
+    driver: bridge
+

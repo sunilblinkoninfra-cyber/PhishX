@@ -1,0 +1,75 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: guardstone-console
+  namespace: default
+  labels:
+    app: guardstone-console
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - guardstone.example.com
+    secretName: guardstone-console-tls
+  
+  rules:
+  - host: guardstone.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: guardstone-console
+            port:
+              number: 80
+  
+  - host: api.guardstone.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: guardstone-api
+            port:
+              number: 8000
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@guardstone.local
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: guardstone-console-cert
+  namespace: default
+spec:
+  secretName: guardstone-console-tls
+  duration: 2160h # 90d
+  renewBefore: 720h # 30d
+  commonName: guardstone.example.com
+  dnsNames:
+  - guardstone.example.com
+  - api.guardstone.example.com
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer

@@ -1,0 +1,12 @@
+import secrets, urllib.parse
+pg = secrets.token_urlsafe(48)
+redis = secrets.token_urlsafe(48)
+graf = secrets.token_urlsafe(24)
+jwt = secrets.token_urlsafe(48)
+smtp = secrets.token_urlsafe(48)
+print('POSTGRES_PASSWORD=' + pg)
+print('REDIS_PASSWORD=' + redis)
+print('GRAFANA_ADMIN_PASSWORD=' + graf)
+print('JWT_SECRET_KEY=' + jwt)
+print('SMTP_PASSWORD=' + smtp)
+print('ENCODED_POSTGRES_PASSWORD=' + urllib.parse.quote_plus(pg))

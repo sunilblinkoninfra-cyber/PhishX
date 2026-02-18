@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guardstone-config
+  namespace: default
+  labels:
+    app: guardstone-console
+data:
+  api-base-url: "https://api.guardstone.example.com"
+  analytics-enabled: "true"
+  log-level: "info"
+  session-timeout: "1800"
+  max-upload-size: "10485760"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: guardstone-secrets
+  namespace: default
+  labels:
+    app: guardstone-console
+type: Opaque
+stringData:
+  sentry-dsn: ""
+  database-url: ""
+  redis-url: ""
+  jwt-secret: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: guardstone-logs
+  namespace: default
+  labels:
+    app: guardstone-console
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: guardstone-cache
+  namespace: default
+  labels:
+    app: guardstone-console
+spec:
+  accessModes:
+  - ReadWriteMany
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 2Gi

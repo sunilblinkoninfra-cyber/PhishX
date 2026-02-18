@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.log
+*.tmp
+
+venv/
+.venv/
+
+generated_secrets.txt
+
+.env
+.env.production
+
+~$*.docx
+
+# Monorepo layout
+backend/__pycache__/
+backend/**/*.py[cod]
+backend/logs/
+backend/attachments/
+backend/quarantine/
+backend/soc_events.db
+backend/data/raw/
+
+frontend/guardstone-console/.next/
+frontend/guardstone-console/node_modules/
+
+# Legacy/temporary docs
+backend/docs/*.docx

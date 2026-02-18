@@ -18,18 +18,21 @@ RUN mkdir -p /var/lib/clamav && freshclam || true
 # ------------------------------------------------------------
 # Working directory
 # ------------------------------------------------------------
-WORKDIR /app
+WORKDIR /app/backend
 
 # ------------------------------------------------------------
 # Python dependencies
 # ------------------------------------------------------------
-COPY requirements.txt .
+COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ------------------------------------------------------------
 # Application source
 # ------------------------------------------------------------
-COPY . .
+COPY . /app
+
+# Ensure both backend modules and top-level services are importable
+ENV PYTHONPATH=/app/backend:/app
 
 # ------------------------------------------------------------
 # Expose FastAPI port (Render injects $PORT)
@@ -37,8 +40,5 @@ COPY . .
 EXPOSE 8000
 
 # ------------------------------------------------------------
-# Start ClamAV daemon + FastAPI
-# ------------------------------------------------------------
-CMD service clamav-daemon start && \
-    CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "$PORT"]
-
+# Start FastAPI application (ClamAV runs as a separate service in compose)
+CMD uvicorn app_new:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WORKERS:-4}
