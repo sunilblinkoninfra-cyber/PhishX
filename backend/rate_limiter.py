@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 # ========================================
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/1")
+REDIS_SOCKET_TIMEOUT = float(os.getenv("REDIS_SOCKET_TIMEOUT", "2"))
 
 class RedisLimiter(Limiter):
     """Extended Limiter with Redis backend"""
@@ -143,7 +144,11 @@ def rate_limit_by_ip(limit: str) -> Callable:
             
             # Check rate limit
             from redis import Redis
-            redis_client = Redis.from_url(REDIS_URL)
+            redis_client = Redis.from_url(
+                REDIS_URL,
+                socket_connect_timeout=REDIS_SOCKET_TIMEOUT,
+                socket_timeout=REDIS_SOCKET_TIMEOUT,
+            )
             
             current = redis_client.incr(key)
             if current == 1:
@@ -180,7 +185,11 @@ def rate_limit_by_key(limit: str) -> Callable:
             key = f"ratelimit:key:{api_key}:{func.__name__}"
             
             from redis import Redis
-            redis_client = Redis.from_url(REDIS_URL)
+            redis_client = Redis.from_url(
+                REDIS_URL,
+                socket_connect_timeout=REDIS_SOCKET_TIMEOUT,
+                socket_timeout=REDIS_SOCKET_TIMEOUT,
+            )
             
             current = redis_client.incr(key)
             if current == 1:
@@ -226,7 +235,11 @@ def rate_limit_by_tenant(limit: str) -> Callable:
             key = f"ratelimit:tenant:{tenant_id}:{func.__name__}"
             
             from redis import Redis
-            redis_client = Redis.from_url(REDIS_URL)
+            redis_client = Redis.from_url(
+                REDIS_URL,
+                socket_connect_timeout=REDIS_SOCKET_TIMEOUT,
+                socket_timeout=REDIS_SOCKET_TIMEOUT,
+            )
             
             current = redis_client.incr(key)
             if current == 1:

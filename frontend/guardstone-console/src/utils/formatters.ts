@@ -3,7 +3,7 @@
  * Functions for formatting dates, risk levels, status, and other data
  */
 
-import { RiskLevel, AlertStatus, UserRole } from '@/types';
+import { RiskLevel, AlertStatus, UserRole } from '@/types/api';
 
 /**
  * Format a date to readable string (e.g., "Jan 15, 2024 2:30 PM")

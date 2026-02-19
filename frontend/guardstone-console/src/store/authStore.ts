@@ -1,46 +1,52 @@
 /**
- * Zustand Auth Store
- * Manages user authentication and session
+ * Auth store used by page-level UI routes.
  */
 
 import { create } from 'zustand';
-import { AuthStoreState, User, AuthResponse } from '@/types';
+import { APIClient } from '@/services/apiClient';
+import { User } from '@/types/api';
+
+interface AuthStoreState {
+  user: User | null;
+  isAuthenticated: boolean;
+  token: string | null;
+  loading: boolean;
+  error: string | null;
+
+  setUser: (user: User) => void;
+  login: (email: string, password: string) => Promise<void>;
+  logout: () => void;
+  checkAuth: () => Promise<void>;
+  refreshToken: () => Promise<void>;
+}
+
+const readToken = () =>
+  typeof window !== 'undefined' ? localStorage.getItem('token') : null;
 
 export const useAuthStore = create<AuthStoreState>((set) => ({
   user: null,
   isAuthenticated: false,
-  token: null,
-  loading: true,
+  token: readToken(),
+  loading: false,
   error: null,
+
+  setUser: (user: User) => {
+    set({ user });
+  },
 
   login: async (email: string, password: string) => {
     set({ loading: true, error: null });
     try {
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Invalid credentials');
-      }
-
-      const data: AuthResponse = await response.json();
-
-      // Store token securely (httpOnly cookie preferred, fallback to localStorage)
-      localStorage.setItem('token', data.token);
-      localStorage.setItem('expiresAt', data.expiresAt.toString());
-
+      const result = await APIClient.auth.login(email, password);
       set({
-        user: data.user,
-        token: data.token,
-        isAuthenticated: true,
+        user: result.user,
+        token: result.token,
+        isAuthenticated: Boolean(result.token),
         loading: false,
       });
-    } catch (err: any) {
+    } catch (err) {
       set({
-        error: err.message || 'Login failed',
+        error: err instanceof Error ? err.message : 'Login failed',
         loading: false,
       });
       throw err;
@@ -48,43 +54,29 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
   },
 
   logout: () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('expiresAt');
+    void APIClient.auth.logout();
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('token');
+      localStorage.removeItem('refresh_token_id');
+    }
     set({
       user: null,
       token: null,
       isAuthenticated: false,
+      error: null,
     });
   },
 
   checkAuth: async () => {
-    const token = localStorage.getItem('token');
-    const expiresAt = localStorage.getItem('expiresAt');
-
-    if (!token || !expiresAt) {
-      set({ loading: false });
+    const token = readToken();
+    if (!token) {
+      set({ loading: false, isAuthenticated: false, user: null, token: null });
       return;
     }
 
-    // Check if token is expired
-    if (new Date(expiresAt) < new Date()) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('expiresAt');
-      set({ loading: false });
-      return;
-    }
-
+    set({ loading: true, error: null });
     try {
-      const response = await fetch('/api/auth/me', {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-
-      if (!response.ok) {
-        throw new Error('Session invalid');
-      }
-
-      const user: User = await response.json();
-
+      const user = await APIClient.auth.me();
       set({
         user,
         token,
@@ -92,45 +84,34 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
         loading: false,
       });
     } catch (err) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('expiresAt');
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('token');
+        localStorage.removeItem('refresh_token_id');
+      }
       set({
         user: null,
         token: null,
         isAuthenticated: false,
         loading: false,
+        error: err instanceof Error ? err.message : 'Authentication check failed',
       });
     }
   },
 
   refreshToken: async () => {
-    const token = localStorage.getItem('token');
-
-    if (!token) {
-      set({ isAuthenticated: false });
-      return;
-    }
-
+    set({ loading: true, error: null });
     try {
-      const response = await fetch('/api/auth/refresh', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-
-      if (!response.ok) {
-        throw new Error('Token refresh failed');
-      }
-
-      const data: AuthResponse = await response.json();
-
-      localStorage.setItem('token', data.token);
-      localStorage.setItem('expiresAt', data.expiresAt.toString());
-
-      set({
-        token: data.token,
-      });
+      const { token } = await APIClient.auth.refreshToken();
+      set({ token, isAuthenticated: Boolean(token), loading: false });
     } catch (err) {
-      set({ isAuthenticated: false });
+      set({
+        user: null,
+        token: null,
+        isAuthenticated: false,
+        loading: false,
+        error: err instanceof Error ? err.message : 'Token refresh failed',
+      });
+      throw err;
     }
   },
 }));

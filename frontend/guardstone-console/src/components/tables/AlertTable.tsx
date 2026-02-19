@@ -5,9 +5,9 @@
 
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Alert } from '@/types';
+import { Alert } from '@/types/api';
 import {
   RiskBadge,
   StatusBadge,
@@ -24,11 +24,14 @@ import {
 interface AlertTableProps {
   alerts: Alert[];
   loading?: boolean;
-  onSelectionChange?: (selectedIds: string[]) => void;
+  onSelectionChange?: (selectedIds: Set<string>) => void;
   pagination?: {
-    page: number;
+    page?: number;
+    currentPage?: number;
     pageSize: number;
-    total: number;
+    total?: number;
+    totalItems?: number;
+    totalPages?: number;
   };
   onPageChange?: (page: number) => void;
   onPageSizeChange?: (size: number) => void;
@@ -44,9 +47,13 @@ export function AlertTable({
 }: AlertTableProps) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
+  const getAlertId = (alert: Alert): string => {
+    return (alert as any).id || (alert as any).metadata?.id || '';
+  };
+
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
-      setSelectedIds(new Set(alerts.map((a) => a.metadata.id)));
+      setSelectedIds(new Set(alerts.map((a) => getAlertId(a)).filter(Boolean)));
     } else {
       setSelectedIds(new Set());
     }
@@ -62,13 +69,12 @@ export function AlertTable({
     setSelectedIds(newSelected);
   };
 
-  useMemo(() => {
-    onSelectionChange?.(Array.from(selectedIds));
+  useEffect(() => {
+    onSelectionChange?.(selectedIds);
   }, [selectedIds, onSelectionChange]);
 
   const allSelected =
     alerts.length > 0 && selectedIds.size === alerts.length;
-  const someSelected = selectedIds.size > 0 && selectedIds.size < alerts.length;
 
   if (loading) {
     return (
@@ -98,13 +104,12 @@ export function AlertTable({
           <thead className="bg-gray-50">
             <tr>
               <th className="px-6 py-3 text-left">
-                <input
-                  type="checkbox"
-                  checked={allSelected}
-                  indeterminate={someSelected}
-                  onChange={(e) => handleSelectAll(e.target.checked)}
-                  className="rounded border-gray-300"
-                />
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={(e) => handleSelectAll(e.target.checked)}
+                    className="rounded border-gray-300"
+                  />
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
                 Timestamp
@@ -129,32 +134,32 @@ export function AlertTable({
           <tbody className="divide-y divide-gray-200 bg-white">
             {alerts.map((alert) => (
               <tr
-                key={alert.metadata.id}
+                key={getAlertId(alert)}
                 className="hover:bg-gray-50 transition-colors"
               >
                 <td className="px-6 py-4 whitespace-nowrap">
                   <input
                     type="checkbox"
-                    checked={selectedIds.has(alert.metadata.id)}
+                    checked={selectedIds.has(getAlertId(alert))}
                     onChange={(e) =>
-                      handleSelectAlert(alert.metadata.id, e.target.checked)
+                      handleSelectAlert(getAlertId(alert), e.target.checked)
                     }
                     className="rounded border-gray-300"
                   />
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  {formatDate(alert.metadata.timestamp)}
+                  {formatDate((alert as any).timestamp || (alert as any).metadata?.timestamp)}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  {formatEmail(alert.metadata.sender, 25)}
+                  {formatEmail((alert as any).from || (alert as any).metadata?.sender || 'unknown@phishx.local', 25)}
                 </td>
                 <td className="px-6 py-4 text-sm text-gray-900 max-w-xs truncate">
-                  {alert.metadata.subject}
+                  {(alert as any).subject || (alert as any).metadata?.subject || '-'}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
                   <RiskBadge
                     level={alert.riskLevel}
-                    score={alert.riskBreakdown.overallRisk}
+                    score={(alert as any).riskBreakdown?.overallRisk ?? (alert as any).riskScore}
                     size="sm"
                   />
                 </td>
@@ -162,7 +167,7 @@ export function AlertTable({
                   <StatusBadge status={alert.status} size="sm" />
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  <Link href={`/alerts/${alert.metadata.id}`}>
+                  <Link href={`/alerts/${getAlertId(alert)}`}>
                     <Button variant="primary" size="sm">
                       Investigate
                     </Button>
@@ -177,9 +182,18 @@ export function AlertTable({
       {/* Pagination */}
       {pagination && (
         <Pagination
-          currentPage={pagination.page}
-          totalPages={Math.ceil(pagination.total / pagination.pageSize)}
-          totalItems={pagination.total}
+          currentPage={pagination.currentPage ?? pagination.page ?? 1}
+          totalPages={
+            pagination.totalPages ??
+            Math.max(
+              1,
+              Math.ceil(
+                ((pagination.totalItems ?? pagination.total ?? alerts.length) || 0) /
+                  Math.max(1, pagination.pageSize)
+              )
+            )
+          }
+          totalItems={pagination.totalItems ?? pagination.total ?? alerts.length}
           pageSize={pagination.pageSize}
           onPageChange={onPageChange || (() => {})}
           onPageSizeChange={onPageSizeChange}

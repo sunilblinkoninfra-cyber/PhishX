@@ -9,7 +9,6 @@ import { useAuthStore } from '@/store/authStore';
 import { useUIStore } from '@/store/uiStore';
 import { APIClient } from '@/services/apiClient';
 import { AuditEntry } from '@/types/api';
-import { AuditAction } from '@/types/store';
 
 export default function AuditPage() {
   const { user } = useAuthStore();

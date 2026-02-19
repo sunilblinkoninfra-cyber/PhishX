@@ -13,12 +13,12 @@ import { formatDate } from '@/utils/formatters';
 
 interface DrillDownPageProps {
   alert: Alert;
-  onStatusChange: (alertId: string, newStatus: AlertStatus, notes: string) => Promise<void>;
+  onStatusChange: (newStatus: AlertStatus, notes: string) => Promise<void>;
   onAddNote: (alertId: string, note: string) => Promise<void>;
   loading?: boolean;
 }
 
-const statusColors: Record<AlertStatus, string> = {
+const statusColors: Partial<Record<AlertStatus, string>> = {
   NEW: 'bg-green-100 text-green-900',
   INVESTIGATING: 'bg-blue-100 text-blue-900',
   CONFIRMED: 'bg-red-100 text-red-900',
@@ -117,7 +117,7 @@ export default function DrillDownPage({
                 </div>
                 <div>
                   <p className="text-sm text-gray-600">Status</p>
-                  <Badge variant="primary" className={statusColors[alert.status]}>
+                  <Badge variant="primary" className={statusColors[alert.status] || 'bg-gray-100 text-gray-900'}>
                     {alert.status}
                   </Badge>
                 </div>

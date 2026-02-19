@@ -5,7 +5,7 @@
 
 'use client';
 
-import { AlertStatus } from '@/types';
+import { AlertStatus } from '@/types/api';
 import { getStatusColor, formatStatus } from '@/utils/formatters';
 
 interface StatusBadgeProps {

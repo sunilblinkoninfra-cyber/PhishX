@@ -22,6 +22,9 @@ import requests
 from log_config import logger
 from circuit_breaker import get_all_breaker_metrics
 
+DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "1"))
+REDIS_SOCKET_TIMEOUT = float(os.getenv("REDIS_SOCKET_TIMEOUT", "2"))
+
 # ========================================
 # Health Status Enums
 # ========================================
@@ -60,7 +63,10 @@ class ComponentHealthCheck:
                     "reason": "DATABASE_URL not configured",
                 }
             
-            conn = psycopg2.connect(database_url)
+            conn = psycopg2.connect(
+                database_url,
+                connect_timeout=DB_CONNECT_TIMEOUT,
+            )
             cur = conn.cursor()
             
             # Check connection
@@ -106,7 +112,12 @@ class ComponentHealthCheck:
         """Check Redis cache health"""
         try:
             redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-            client = Redis.from_url(redis_url, decode_responses=True)
+            client = Redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=REDIS_SOCKET_TIMEOUT,
+                socket_timeout=REDIS_SOCKET_TIMEOUT,
+            )
             
             # Check connectivity
             start = datetime.utcnow()
@@ -148,7 +159,12 @@ class ComponentHealthCheck:
         """Check message queue health"""
         try:
             redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-            client = Redis.from_url(redis_url, decode_responses=True)
+            client = Redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=REDIS_SOCKET_TIMEOUT,
+                socket_timeout=REDIS_SOCKET_TIMEOUT,
+            )
             
             queues = {
                 "emails": "celery:emails",

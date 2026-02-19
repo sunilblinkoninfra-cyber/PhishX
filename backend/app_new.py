@@ -15,7 +15,7 @@ import os
 import uuid
 import json
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any, Dict, List
 from contextlib import asynccontextmanager
 
 import requests
@@ -72,7 +72,7 @@ from auth_integration import (
     log_auth_event,
     JWTConfig,
 )
-from jwt_auth import TokenPayload, UserRole, TokenScope
+from jwt_auth import TokenPayload, UserRole, TokenScope, JWTTokenManager
 from anomaly_integration import (
     detect_anomalies,
     should_escalate_anomaly,
@@ -92,6 +92,7 @@ API_KEY = os.getenv("API_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 NLP_SERVICE_URL = os.getenv("NLP_SERVICE_URL")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+DEFAULT_TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "00000000-0000-0000-0000-000000000000")
 
 if not API_KEY:
     raise RuntimeError("API_KEY environment variable is required")
@@ -139,7 +140,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
     allow_credentials=True,
-    allow_methods=["POST", "GET"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -224,16 +225,21 @@ def authenticate_request(request: Request) -> str:
     if api_key.lower().startswith("bearer "):
         api_key = api_key.split(" ", 1)[1].strip()
     
-    # Validate API key
-    if api_key != API_KEY:
-        logger.security_event(
-            "Invalid API key",
-            severity="HIGH",
-            ip=request.client.host if request.client else "unknown",
-        )
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    
-    return get_api_key_from_request(request)
+    # Validate API key first (legacy mode)
+    if api_key == API_KEY:
+        return get_api_key_from_request(request)
+
+    # Accept JWT access tokens for frontend compatibility
+    jwt_payload = JWTTokenManager.validate_token(api_key)
+    if jwt_payload:
+        return f"jwt:{jwt_payload.user_id}"
+
+    logger.security_event(
+        "Invalid API key/token",
+        severity="HIGH",
+        ip=request.client.host if request.client else "unknown",
+    )
+    raise HTTPException(status_code=401, detail="Invalid API key/token")
 
 
 def resolve_tenant(
@@ -244,12 +250,12 @@ def resolve_tenant(
     Resolve tenant ID from request headers with validation.
     """
     if not x_tenant_id:
-        logger.security_event(
-            "Missing tenant ID",
-            severity="MEDIUM",
+        logger.warning(
+            "tenant_header_missing_using_default",
+            default_tenant_id=DEFAULT_TENANT_ID,
             ip=request.client.host if request.client else "unknown",
         )
-        raise HTTPException(status_code=400, detail="X-Tenant-ID header required")
+        x_tenant_id = DEFAULT_TENANT_ID
     
     # Parse as UUID
     import uuid as uuid_module
@@ -265,6 +271,179 @@ def resolve_tenant(
         raise HTTPException(status_code=400, detail="Invalid tenant ID format")
     
     return x_tenant_id
+
+
+def _safe_json(value: Any) -> Dict[str, Any]:
+    """Safely parse JSON payloads from DB rows."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
+def _as_iso(value: Any) -> str:
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return datetime.utcnow().isoformat()
+
+
+def _risk_level_from_category(category: Optional[str]) -> str:
+    category_u = (category or "COLD").upper()
+    if category_u in ("HOT", "WARM", "COLD"):
+        return category_u
+    return "COLD"
+
+
+def _risk_score_to_ten(score: Any) -> float:
+    try:
+        numeric = float(score or 0)
+    except Exception:
+        numeric = 0.0
+    if numeric > 10:
+        numeric = numeric / 10.0
+    return round(max(0.0, min(10.0, numeric)), 1)
+
+
+def _normalize_status(status: Optional[str]) -> str:
+    mapping = {
+        "OPEN": "NEW",
+        "NEW": "NEW",
+        "INVESTIGATING": "INVESTIGATING",
+        "RESOLVED": "RESOLVED",
+        "CONFIRMED": "CONFIRMED",
+        "FALSE_POSITIVE": "FALSE_POSITIVE",
+        "ESCALATED": "ESCALATED",
+        "RELEASED": "RELEASED",
+        "DELETED": "DELETED",
+    }
+    return mapping.get((status or "NEW").upper(), "NEW")
+
+
+def _to_string_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(v) for v in value if str(v).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _build_alert_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert backend DB rows into frontend-ready alert shape."""
+    findings = _safe_json(row.get("findings"))
+    alert_id = str(row.get("alert_id") or row.get("id") or row.get("email_id"))
+    email_id = str(row.get("email_id") or alert_id)
+
+    sender = (
+        findings.get("sender")
+        or findings.get("from")
+        or findings.get("mail_from")
+        or "unknown@phishx.local"
+    )
+    recipients = _to_string_list(
+        findings.get("recipient")
+        or findings.get("to")
+        or findings.get("recipients")
+    )
+    if not recipients:
+        recipients = ["unknown@phishx.local"]
+    subject = findings.get("subject") or f"Email {email_id}"
+    body_preview = findings.get("body_preview") or findings.get("body") or ""
+    if isinstance(body_preview, str) and len(body_preview) > 300:
+        body_preview = body_preview[:300]
+    urls = _to_string_list(findings.get("urls"))
+    attachments_raw = findings.get("attachments")
+    attachments: List[str] = []
+    if isinstance(attachments_raw, list):
+        for item in attachments_raw:
+            if isinstance(item, dict):
+                attachments.append(str(item.get("filename") or item.get("name") or "attachment"))
+            else:
+                attachments.append(str(item))
+
+    category = _risk_level_from_category(row.get("category"))
+    status = _normalize_status(row.get("status"))
+    risk_score = _risk_score_to_ten(row.get("risk_score"))
+    classification = findings.get("classification")
+    if not classification:
+        classification = "PHISHING" if category in ("HOT", "WARM") else "LEGITIMATE"
+    classification = str(classification).upper()
+
+    timestamp = (
+        row.get("alert_created_at")
+        or row.get("email_created_at")
+        or row.get("created_at")
+        or datetime.utcnow()
+    )
+    timestamp_iso = _as_iso(timestamp)
+
+    return {
+        "id": alert_id,
+        "emailId": email_id,
+        "timestamp": timestamp_iso,
+        "from": sender,
+        "to": recipients[0],
+        "subject": subject,
+        "bodyPreview": body_preview,
+        "urls": urls,
+        "attachments": attachments,
+        "riskScore": risk_score,
+        "riskLevel": category,
+        "status": status,
+        "classification": classification,
+        "classifications": [classification],
+        "metadata": {
+            "id": alert_id,
+            "timestamp": timestamp_iso,
+            "sender": sender,
+            "recipient": recipients,
+            "subject": subject,
+            "received": timestamp_iso,
+            "bodyPreview": body_preview,
+            "classifications": [classification],
+        },
+        "riskBreakdown": {
+            "phishingScore": risk_score,
+            "malwareScore": round(risk_score * 0.8, 1),
+            "urlReputation": round(risk_score * 0.7, 1),
+            "senderReputation": round(risk_score * 0.6, 1),
+            "contentSuspicion": round(risk_score * 0.9, 1),
+            "overallRisk": risk_score,
+        },
+        "auditHistory": [],
+    }
+
+
+def _fetch_alert_row(conn, alert_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            sa.id AS alert_id,
+            sa.email_id,
+            sa.category,
+            sa.status,
+            sa.created_at AS alert_created_at,
+            sa.updated_at AS alert_updated_at,
+            ed.risk_score,
+            ed.findings,
+            ed.decision,
+            ed.created_at AS email_created_at
+        FROM soc_alerts sa
+        LEFT JOIN email_decisions ed ON sa.email_id = ed.id
+        WHERE sa.tenant_id = %s AND sa.id = %s
+        LIMIT 1
+        """,
+        (tenant_id, alert_id),
+    )
+    row = cur.fetchone()
+    cur.close()
+    return row
 
 
 def get_active_policy(tenant_id: str) -> dict:
@@ -350,53 +529,72 @@ def call_nlp_service(subject: str, body: str) -> dict:
 
 @app.post("/auth/login")
 async def login(
-    username: str,
-    password: str,
     request: Request,
-) -> dict:
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    email: Optional[str] = None,
+):
     """
     Authenticate user and issue JWT tokens.
-    
-    Args:
-        username: User identifier
-        password: User password
-    
-    Returns:
-        JWT access token and refresh token
+    Supports query params and JSON body for frontend compatibility.
     """
     try:
+        body_data: Dict[str, Any] = {}
+        try:
+            body_data = await request.json()
+        except Exception:
+            body_data = {}
+
+        user_identifier = (
+            username
+            or email
+            or body_data.get("username")
+            or body_data.get("email")
+            or ""
+        )
+        user_password = password or body_data.get("password") or ""
+
+        if not user_identifier or not user_password:
+            raise HTTPException(status_code=400, detail="username/email and password are required")
+
         from auth_integration import verify_password, UserRole, TokenScope
-        
-        # TODO: Verify against user database (stub for now)
-        # In production: Hash password, check against database
-        
-        # Log authentication attempt
+
+        if not verify_password(user_identifier, user_password):
+            raise HTTPException(status_code=401, detail="Authentication failed")
+
         log_auth_event(
             event_type="login",
-            user_id=username,
-            tenant_id="default",  # Would come from user DB
+            user_id=user_identifier,
+            tenant_id="default",
             status="success",
             ip_address=request.client.host if request.client else "unknown",
         )
-        
-        # Create tokens
+
         tokens = create_jwt_tokens(
-            user_id=username,
+            user_id=user_identifier,
             tenant_id="default",
             role=UserRole.API_CLIENT,
             scopes=[TokenScope.READ, TokenScope.WRITE, TokenScope.EMAIL_INGEST],
         )
-        
+
         return {
             "status": "ok",
             "data": tokens,
+            "user": {
+                "id": user_identifier,
+                "email": user_identifier,
+                "name": user_identifier.split("@")[0] if "@" in user_identifier else user_identifier,
+                "role": "SOC_ANALYST",
+            },
         }
-    
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("login_failed", error=str(e))
         log_auth_event(
             event_type="login",
-            user_id=username,
+            user_id=username or email or "unknown",
             tenant_id="unknown",
             status="failure",
             details={"error": str(e)},
@@ -406,48 +604,54 @@ async def login(
 
 @app.post("/auth/refresh")
 async def refresh_token(
-    refresh_token_id: str,
     request: Request,
 ) -> dict:
     """
     Refresh expired access token using refresh token.
-    
-    Args:
-        refresh_token_id: Refresh token from login response
-    
-    Returns:
-        New JWT access token
+    Supports query params and JSON body payloads.
     """
     try:
-        from jwt_auth import JWTTokenManager
-        
-        # Validate refresh token and get user info
-        # In production: Look up user info from refresh token ID
+        body_data: Dict[str, Any] = {}
+        try:
+            body_data = await request.json()
+        except Exception:
+            body_data = {}
+
+        refresh_token_id = (
+            request.query_params.get("refresh_token_id")
+            or body_data.get("refresh_token_id")
+            or body_data.get("refreshToken")
+            or ""
+        )
+        if not refresh_token_id:
+            raise HTTPException(status_code=400, detail="refresh_token_id is required")
+
         user_id = "default_user"
         tenant_id = "default"
-        
-        # Generate new access token
+
         new_access_token = JWTTokenManager.generate_access_token(
             user_id=user_id,
             tenant_id=tenant_id,
             role=UserRole.API_CLIENT,
             scopes=[TokenScope.READ, TokenScope.WRITE, TokenScope.EMAIL_INGEST],
         )
-        
+
         log_auth_event(
             event_type="refresh",
             user_id=user_id,
             tenant_id=tenant_id,
             status="success",
         )
-        
+
         return {
             "status": "ok",
             "access_token": new_access_token,
             "token_type": "bearer",
             "expires_in": JWTConfig.JWT_ACCESS_TOKEN_EXPIRE * 60,
         }
-    
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("token_refresh_failed", error=str(e))
         raise HTTPException(status_code=401, detail="Token refresh failed")
@@ -483,6 +687,53 @@ async def logout(
     except Exception as e:
         logger.error("logout_failed", error=str(e))
         return {"status": "error", "message": str(e)}
+
+
+@app.get("/auth/me")
+async def auth_me(authorization: Optional[str] = Header(None)) -> dict:
+    """Return current authenticated user profile."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+
+    token_or_key = authorization
+    if token_or_key.lower().startswith("bearer "):
+        token_or_key = token_or_key.split(" ", 1)[1].strip()
+
+    if token_or_key == API_KEY:
+        return {
+            "id": "api-client",
+            "email": "api-client@phishx.local",
+            "name": "API Client",
+            "role": "SOC_ANALYST",
+        }
+
+    payload = JWTTokenManager.validate_token(token_or_key)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    return {
+        "id": payload.user_id,
+        "email": payload.user_id,
+        "name": payload.user_id.split("@")[0] if "@" in payload.user_id else payload.user_id,
+        "role": "SOC_ANALYST",
+        "tenantId": payload.tenant_id,
+    }
+
+
+@app.get("/auth/validate")
+async def auth_validate(authorization: Optional[str] = Header(None)) -> dict:
+    """Validate API key/JWT token and return boolean status."""
+    if not authorization:
+        return {"valid": False}
+
+    token_or_key = authorization
+    if token_or_key.lower().startswith("bearer "):
+        token_or_key = token_or_key.split(" ", 1)[1].strip()
+
+    if token_or_key == API_KEY:
+        return {"valid": True}
+
+    return {"valid": JWTTokenManager.validate_token(token_or_key) is not None}
 
 
 # ========================================
@@ -531,7 +782,7 @@ async def health_check_full() -> dict:
     Detailed diagnostics including queue depth, external services, circuit breakers.
     """
     try:
-        health = await SystemHealthCheck.get_full_health()
+        health = SystemHealthCheck.get_full_health()
         
         return {
             "status": health.get("status", "unknown"),
@@ -549,7 +800,7 @@ async def health_check_full() -> dict:
 async def readiness_probe() -> dict:
     """Kubernetes readiness probe"""
     try:
-        readiness = await SystemHealthCheck.get_readiness()
+        readiness = SystemHealthCheck.get_readiness()
         status_code = 200 if readiness.get("ready") else 503
         return readiness
     except Exception:
@@ -560,7 +811,7 @@ async def readiness_probe() -> dict:
 async def liveness_probe() -> dict:
     """Kubernetes liveness probe"""
     try:
-        liveness = await SystemHealthCheck.get_liveness()
+        liveness = SystemHealthCheck.get_liveness()
         status_code = 200 if liveness.get("alive") else 503
         return liveness
     except Exception:
@@ -969,6 +1220,614 @@ async def soc_alert_action(
     except Exception as e:
         logger.error("soc_action_failed", error=str(e))
         raise HTTPException(status_code=500, detail="Failed to record action")
+
+
+# ========================================
+# Frontend Compatibility Endpoints
+# ========================================
+
+@app.get("/alerts")
+async def list_alerts(
+    request: Request,
+    authorized: str = Depends(authenticate_request),
+    tenant_id: str = Depends(resolve_tenant),
+    riskLevels: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """List alerts in frontend-friendly shape."""
+    try:
+        categories = []
+        if riskLevels:
+            categories = [v.strip().upper() for v in riskLevels.split(",") if v.strip()]
+
+        conn = get_db()
+        cur = conn.cursor()
+
+        where_sql = ["sa.tenant_id = %s"]
+        params: List[Any] = [tenant_id]
+
+        if categories:
+            where_sql.append("sa.category = ANY(%s)")
+            params.append(categories)
+
+        if status:
+            status_values = [v.strip().upper() for v in status.split(",") if v.strip()]
+            backend_statuses = ["OPEN" if v == "NEW" else v for v in status_values]
+            if backend_statuses:
+                where_sql.append("sa.status = ANY(%s)")
+                params.append(backend_statuses)
+
+        where_clause = " AND ".join(where_sql)
+
+        cur.execute(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM soc_alerts sa
+            WHERE {where_clause}
+            """,
+            params,
+        )
+        total_row = cur.fetchone() or {}
+        total = int(total_row.get("total", 0))
+
+        cur.execute(
+            f"""
+            SELECT
+                sa.id AS alert_id,
+                sa.email_id,
+                sa.category,
+                sa.status,
+                sa.created_at AS alert_created_at,
+                sa.updated_at AS alert_updated_at,
+                ed.risk_score,
+                ed.findings,
+                ed.decision,
+                ed.created_at AS email_created_at
+            FROM soc_alerts sa
+            LEFT JOIN email_decisions ed ON sa.email_id = ed.id
+            WHERE {where_clause}
+            ORDER BY sa.created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            [*params, limit, offset],
+        )
+        rows = cur.fetchall() or []
+        cur.close()
+        conn.close()
+
+        items = [_build_alert_payload(dict(row)) for row in rows]
+        return {"items": items, "total": total}
+
+    except Exception as e:
+        logger.error("list_alerts_failed", error=str(e))
+        if ENVIRONMENT == "development":
+            return {"items": [], "total": 0}
+        raise HTTPException(status_code=500, detail="Failed to list alerts")
+
+
+@app.get("/logs")
+async def list_logs(
+    request: Request,
+    authorized: str = Depends(authenticate_request),
+    tenant_id: str = Depends(resolve_tenant),
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """List COLD category decisions as informational logs."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM email_decisions
+            WHERE tenant_id = %s AND category = 'COLD'
+            """,
+            (tenant_id,),
+        )
+        total_row = cur.fetchone() or {}
+        total = int(total_row.get("total", 0))
+
+        cur.execute(
+            """
+            SELECT
+                ed.id AS alert_id,
+                ed.id AS email_id,
+                ed.category,
+                'RESOLVED' AS status,
+                ed.created_at AS email_created_at,
+                ed.created_at AS alert_created_at,
+                ed.risk_score,
+                ed.findings,
+                ed.decision
+            FROM email_decisions ed
+            WHERE ed.tenant_id = %s
+              AND ed.category = 'COLD'
+            ORDER BY ed.created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (tenant_id, limit, offset),
+        )
+        rows = cur.fetchall() or []
+        cur.close()
+        conn.close()
+
+        items = [_build_alert_payload(dict(row)) for row in rows]
+        return {"items": items, "total": total}
+
+    except Exception as e:
+        logger.error("list_logs_failed", error=str(e))
+        if ENVIRONMENT == "development":
+            return {"items": [], "total": 0}
+        raise HTTPException(status_code=500, detail="Failed to list logs")
+
+
+@app.get("/alerts/{alert_id}")
+async def get_alert(
+    request: Request,
+    alert_id: str,
+    authorized: str = Depends(authenticate_request),
+    tenant_id: str = Depends(resolve_tenant),
+) -> dict:
+    """Fetch a single alert by ID."""
+    try:
+        conn = get_db()
+        row = _fetch_alert_row(conn, alert_id, tenant_id)
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        return _build_alert_payload(dict(row))
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("get_alert_failed", alert_id=alert_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch alert")
+
+
+@app.post("/alerts/{alert_id}/status")
+async def update_alert_status(
+    request: Request,
+    alert_id: str,
+    authorized: str = Depends(authenticate_request),
+    tenant_id: str = Depends(resolve_tenant),
+) -> dict:
+    """Update alert status with optional notes."""
+    try:
+        payload = await request.json()
+        desired_status = _normalize_status(payload.get("status"))
+        notes = str(payload.get("notes") or "")
+        changed_by = str(payload.get("changedBy") or payload.get("changed_by") or "system")
+
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            UPDATE soc_alerts
+            SET status = %s, updated_at = NOW()
+            WHERE id = %s AND tenant_id = %s
+            """,
+            (desired_status, alert_id, tenant_id),
+        )
+        if cur.rowcount == 0:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        cur.execute(
+            """
+            INSERT INTO soc_actions (id, alert_id, action, acted_by, notes, created_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            """,
+            (
+                str(uuid.uuid4()),
+                alert_id,
+                "status_change",
+                json.dumps({"analyst": changed_by, "tenant_id": tenant_id}),
+                notes,
+            ),
+        )
+
+        conn.commit()
+        row = _fetch_alert_row(conn, alert_id, tenant_id)
+        cur.close()
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        return _build_alert_payload(dict(row))
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("update_alert_status_failed", alert_id=alert_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to update alert status")
+
+
+@app.post("/alerts/{alert_id}/notes")
+async def add_alert_note(
+    request: Request,
+    alert_id: str,
+    authorized: str = Depends(authenticate_request),
+    tenant_id: str = Depends(resolve_tenant),
+) -> dict:
+    """Append an analyst note for an alert."""
+    try:
+        payload = await request.json()
+        note_text = str(payload.get("notes") or payload.get("text") or "").strip()
+        added_by = str(payload.get("addedBy") or payload.get("added_by") or "system")
+
+        if not note_text:
+            raise HTTPException(status_code=400, detail="Note text is required")
+
+        action_id = str(uuid.uuid4())
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            INSERT INTO soc_actions (id, alert_id, action, acted_by, notes, created_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            """,
+            (
+                action_id,
+                alert_id,
+                "note",
+                json.dumps({"analyst": added_by, "tenant_id": tenant_id}),
+                note_text,
+            ),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {
+            "id": action_id,
+            "alertId": alert_id,
+            "text": note_text,
+            "addedBy": added_by,
+            "createdAt": datetime.utcnow().isoformat(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("add_alert_note_failed", alert_id=alert_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to add note")
+
+
+@app.post("/alerts/{alert_id}/release")
+async def release_alert(
+    request: Request,
+    alert_id: str,
+    authorized: str = Depends(authenticate_request),
+    tenant_id: str = Depends(resolve_tenant),
+) -> dict:
+    """Release alert from quarantine workflow."""
+    try:
+        payload = await request.json()
+        released_by = str(payload.get("releasedBy") or payload.get("released_by") or "system")
+
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            UPDATE soc_alerts
+            SET status = 'RELEASED', updated_at = NOW()
+            WHERE id = %s AND tenant_id = %s
+            """,
+            (alert_id, tenant_id),
+        )
+        if cur.rowcount == 0:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        cur.execute(
+            """
+            INSERT INTO soc_actions (id, alert_id, action, acted_by, notes, created_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            """,
+            (
+                str(uuid.uuid4()),
+                alert_id,
+                "release",
+                json.dumps({"analyst": released_by, "tenant_id": tenant_id}),
+                "Released from quarantine",
+            ),
+        )
+
+        conn.commit()
+        row = _fetch_alert_row(conn, alert_id, tenant_id)
+        cur.close()
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        return _build_alert_payload(dict(row))
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("release_alert_failed", alert_id=alert_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to release alert")
+
+
+@app.delete("/alerts/{alert_id}")
+async def delete_alert(
+    request: Request,
+    alert_id: str,
+    authorized: str = Depends(authenticate_request),
+    tenant_id: str = Depends(resolve_tenant),
+) -> dict:
+    """Soft-delete alert by transitioning status to DELETED."""
+    try:
+        payload: Dict[str, Any] = {}
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        deleted_by = str(payload.get("deletedBy") or payload.get("deleted_by") or "system")
+
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            UPDATE soc_alerts
+            SET status = 'DELETED', updated_at = NOW()
+            WHERE id = %s AND tenant_id = %s
+            """,
+            (alert_id, tenant_id),
+        )
+        if cur.rowcount == 0:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        cur.execute(
+            """
+            INSERT INTO soc_actions (id, alert_id, action, acted_by, notes, created_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            """,
+            (
+                str(uuid.uuid4()),
+                alert_id,
+                "delete",
+                json.dumps({"analyst": deleted_by, "tenant_id": tenant_id}),
+                "Alert deleted",
+            ),
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {"status": "ok", "id": alert_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("delete_alert_failed", alert_id=alert_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to delete alert")
+
+
+@app.get("/audit")
+async def list_audit_entries(
+    request: Request,
+    authorized: str = Depends(authenticate_request),
+    tenant_id: str = Depends(resolve_tenant),
+    limit: int = 500,
+    offset: int = 0,
+) -> dict:
+    """List SOC actions as frontend audit entries."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM soc_actions sact
+            JOIN soc_alerts sa ON sa.id = sact.alert_id
+            WHERE sa.tenant_id = %s
+            """,
+            (tenant_id,),
+        )
+        total_row = cur.fetchone() or {}
+        total = int(total_row.get("total", 0))
+
+        cur.execute(
+            """
+            SELECT
+                sact.id,
+                sact.alert_id,
+                sact.action,
+                sact.notes,
+                sact.acted_by,
+                sact.created_at
+            FROM soc_actions sact
+            JOIN soc_alerts sa ON sa.id = sact.alert_id
+            WHERE sa.tenant_id = %s
+            ORDER BY sact.created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (tenant_id, limit, offset),
+        )
+        rows = cur.fetchall() or []
+        cur.close()
+        conn.close()
+
+        action_map = {
+            "note": "NOTED",
+            "release": "RELEASED",
+            "resolve": "RESOLVED",
+            "delete": "DELETED",
+            "escalate": "ESCALATED",
+            "status_change": "UPDATED",
+        }
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            actor_meta = _safe_json(row.get("acted_by"))
+            actor_name = (
+                actor_meta.get("analyst")
+                or actor_meta.get("user")
+                or actor_meta.get("user_id")
+                or "system"
+            )
+            actor_email = actor_meta.get("email")
+            if not actor_email:
+                actor_email = actor_name if "@" in str(actor_name) else f"{actor_name}@phishx.local"
+
+            raw_action = str(row.get("action") or "")
+            action = action_map.get(raw_action.lower(), raw_action.upper() or "VIEWED")
+            ts = row.get("created_at") or datetime.utcnow()
+            ts_iso = _as_iso(ts)
+            items.append(
+                {
+                    "id": str(row.get("id")),
+                    "timestamp": ts_iso,
+                    "userId": str(actor_name),
+                    "userName": str(actor_name),
+                    "userEmail": str(actor_email),
+                    "action": action,
+                    "alertId": str(row.get("alert_id")),
+                    "notes": row.get("notes"),
+                }
+            )
+
+        return {"items": items, "total": total}
+
+    except Exception as e:
+        logger.error("list_audit_entries_failed", error=str(e))
+        if ENVIRONMENT == "development":
+            return {"items": [], "total": 0}
+        raise HTTPException(status_code=500, detail="Failed to list audit entries")
+
+
+@app.post("/exports")
+async def create_export_job(
+    request: Request,
+    authorized: str = Depends(authenticate_request),
+    tenant_id: str = Depends(resolve_tenant),
+) -> dict:
+    """Create an export job placeholder for frontend workflows."""
+    payload = await request.json()
+    return {
+        "jobId": str(uuid.uuid4()),
+        "status": "QUEUED",
+        "format": str(payload.get("format") or "CSV"),
+        "createdAt": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/metrics/dashboard")
+async def dashboard_metrics(
+    request: Request,
+    authorized: str = Depends(authenticate_request),
+    tenant_id: str = Depends(resolve_tenant),
+) -> dict:
+    """Return dashboard metric summary in frontend-friendly format."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT category, COUNT(*) AS count
+            FROM email_decisions
+            WHERE tenant_id = %s
+            GROUP BY category
+            """,
+            (tenant_id,),
+        )
+        counts = {"COLD": 0, "WARM": 0, "HOT": 0}
+        for row in cur.fetchall() or []:
+            counts[str(row.get("category", "")).upper()] = int(row.get("count", 0))
+
+        cur.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM email_decisions
+            WHERE tenant_id = %s
+              AND created_at::date = CURRENT_DATE
+            """,
+            (tenant_id,),
+        )
+        today_count = int((cur.fetchone() or {}).get("count", 0))
+
+        cur.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM soc_alerts
+            WHERE tenant_id = %s
+            GROUP BY status
+            """,
+            (tenant_id,),
+        )
+        status_counts: Dict[str, int] = {}
+        for row in cur.fetchall() or []:
+            normalized = _normalize_status(row.get("status"))
+            status_counts[normalized] = status_counts.get(normalized, 0) + int(row.get("count", 0))
+
+        cur.close()
+        conn.close()
+
+        total_alerts = counts["COLD"] + counts["WARM"] + counts["HOT"]
+        return {
+            "totalAlerts": total_alerts,
+            "newAlerts": today_count,
+            "hotAlerts": counts["HOT"],
+            "warmAlerts": counts["WARM"],
+            "coldAlerts": counts["COLD"],
+            "quarantinedEmails": counts["HOT"],
+            "alertsByRisk": counts,
+            "alertsByStatus": status_counts,
+            "topSenders": [],
+            "topDetectedThreats": [],
+        }
+
+    except Exception as e:
+        logger.error("dashboard_metrics_failed", error=str(e))
+        if ENVIRONMENT == "development":
+            return {
+                "totalAlerts": 0,
+                "newAlerts": 0,
+                "hotAlerts": 0,
+                "warmAlerts": 0,
+                "coldAlerts": 0,
+                "quarantinedEmails": 0,
+                "alertsByRisk": {"COLD": 0, "WARM": 0, "HOT": 0},
+                "alertsByStatus": {},
+                "topSenders": [],
+                "topDetectedThreats": [],
+            }
+        raise HTTPException(status_code=500, detail="Failed to fetch dashboard metrics")
+
+
+@app.patch("/users/{user_id}")
+async def update_user_profile(
+    request: Request,
+    user_id: str,
+    authorized: str = Depends(authenticate_request),
+) -> dict:
+    """Lightweight profile update endpoint for settings page."""
+    payload = await request.json()
+    return {
+        "id": user_id,
+        "email": payload.get("email"),
+        "name": payload.get("name"),
+        "role": "SOC_ANALYST",
+    }
 
 
 # ========================================

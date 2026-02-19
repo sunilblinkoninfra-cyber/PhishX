@@ -7,6 +7,8 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL environment variable is required")
 
+DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "1"))
+
 # ========================================
 # Phase 3: Encryption Integration
 # ========================================
@@ -26,7 +28,8 @@ def get_db():
     """Get database connection"""
     return psycopg2.connect(
         DATABASE_URL,
-        cursor_factory=RealDictCursor
+        cursor_factory=RealDictCursor,
+        connect_timeout=DB_CONNECT_TIMEOUT,
     )
 
 

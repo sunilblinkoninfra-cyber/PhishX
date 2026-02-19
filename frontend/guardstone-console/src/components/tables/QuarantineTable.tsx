@@ -7,7 +7,7 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
-import { Alert } from '@/types';
+import { Alert } from '@/types/api';
 import {
   RiskBadge,
   StatusBadge,
@@ -30,9 +30,12 @@ interface QuarantineTableProps {
   onRelease?: (alertId: string) => Promise<void>;
   onDelete?: (alertId: string) => Promise<void>;
   pagination?: {
-    page: number;
+    page?: number;
+    currentPage?: number;
     pageSize: number;
-    total: number;
+    total?: number;
+    totalItems?: number;
+    totalPages?: number;
   };
   onPageChange?: (page: number) => void;
   onPageSizeChange?: (size: number) => void;
@@ -126,22 +129,22 @@ export function QuarantineTable({
             <tbody className="divide-y divide-gray-200 bg-white">
               {alerts.map((alert) => (
                 <tr
-                  key={alert.metadata.id}
+                  key={(alert as any).id || (alert as any).metadata?.id}
                   className="hover:bg-red-50 transition-colors"
                 >
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {formatDate(alert.metadata.timestamp)}
+                    {formatDate((alert as any).timestamp || (alert as any).metadata?.timestamp)}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {formatEmail(alert.metadata.sender, 25)}
+                    {formatEmail((alert as any).from || (alert as any).metadata?.sender || 'unknown@phishx.local', 25)}
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-900 max-w-xs truncate">
-                    {alert.metadata.subject}
+                    {(alert as any).subject || (alert as any).metadata?.subject || '-'}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <RiskBadge
                       level={alert.riskLevel}
-                      score={alert.riskBreakdown.overallRisk}
+                      score={(alert as any).riskBreakdown?.overallRisk ?? (alert as any).riskScore}
                       size="sm"
                     />
                   </td>
@@ -149,7 +152,7 @@ export function QuarantineTable({
                     <StatusBadge status={alert.status} size="sm" />
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm space-x-2">
-                    <Link href={`/quarantine/${alert.metadata.id}`}>
+                    <Link href={`/quarantine/${(alert as any).id || (alert as any).metadata?.id}`}>
                       <Button variant="ghost" size="sm">
                         Review
                       </Button>
@@ -157,14 +160,14 @@ export function QuarantineTable({
                     <Button
                       variant="primary"
                       size="sm"
-                      disabled={actionInProgress === alert.metadata.id}
+                      disabled={actionInProgress === ((alert as any).id || (alert as any).metadata?.id)}
                       isLoading={
-                        actionInProgress === alert.metadata.id &&
+                        actionInProgress === ((alert as any).id || (alert as any).metadata?.id) &&
                         confirmDialog?.action === 'release'
                       }
                       onClick={() =>
                         setConfirmDialog({
-                          alertId: alert.metadata.id,
+                          alertId: (alert as any).id || (alert as any).metadata?.id,
                           action: 'release',
                         })
                       }
@@ -174,14 +177,14 @@ export function QuarantineTable({
                     <Button
                       variant="danger"
                       size="sm"
-                      disabled={actionInProgress === alert.metadata.id}
+                      disabled={actionInProgress === ((alert as any).id || (alert as any).metadata?.id)}
                       isLoading={
-                        actionInProgress === alert.metadata.id &&
+                        actionInProgress === ((alert as any).id || (alert as any).metadata?.id) &&
                         confirmDialog?.action === 'delete'
                       }
                       onClick={() =>
                         setConfirmDialog({
-                          alertId: alert.metadata.id,
+                          alertId: (alert as any).id || (alert as any).metadata?.id,
                           action: 'delete',
                         })
                       }
@@ -198,9 +201,18 @@ export function QuarantineTable({
         {/* Pagination */}
         {pagination && (
           <Pagination
-            currentPage={pagination.page}
-            totalPages={Math.ceil(pagination.total / pagination.pageSize)}
-            totalItems={pagination.total}
+            currentPage={pagination.currentPage ?? pagination.page ?? 1}
+            totalPages={
+              pagination.totalPages ??
+              Math.max(
+                1,
+                Math.ceil(
+                  ((pagination.totalItems ?? pagination.total ?? alerts.length) || 0) /
+                    Math.max(1, pagination.pageSize)
+                )
+              )
+            }
+            totalItems={pagination.totalItems ?? pagination.total ?? alerts.length}
             pageSize={pagination.pageSize}
             onPageChange={onPageChange || (() => {})}
             onPageSizeChange={onPageSizeChange}

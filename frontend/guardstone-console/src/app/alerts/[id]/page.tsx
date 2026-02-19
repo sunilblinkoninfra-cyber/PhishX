@@ -91,7 +91,7 @@ export default function AlertDetailsPage() {
       addToast('Note added successfully', 'success');
       // Optionally refresh alert to show new note
     } catch (err) {
-      const message = err instanceof Error ? error.message : 'Failed to add note';
+      const message = err instanceof Error ? err.message : 'Failed to add note';
       addToast(message, 'error');
       throw err;
     }

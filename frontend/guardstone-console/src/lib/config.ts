@@ -88,14 +88,17 @@ function getEnvironmentConfig(): Config {
     },
 
     api: {
-      baseUrl: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api',
-      timeout: parseInt(process.env.API_TIMEOUT || '30000'),
+      baseUrl: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000',
+      timeout: parseInt(process.env.NEXT_PUBLIC_API_TIMEOUT || process.env.API_TIMEOUT || '30000'),
       retries: parseInt(process.env.API_RETRIES || '3'),
     },
 
     websocket: {
       enabled: process.env.WEBSOCKET_ENABLED !== 'false',
-      url: process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001',
+      url:
+        process.env.NEXT_PUBLIC_WS_URL ||
+        process.env.NEXT_PUBLIC_WEBSOCKET_URL ||
+        'ws://localhost:8000/ws',
       reconnect: true,
       reconnectInterval: parseInt(process.env.WS_RECONNECT_INTERVAL || '3000'),
       maxReconnectAttempts: parseInt(process.env.WS_MAX_RECONNECT_ATTEMPTS || '5'),

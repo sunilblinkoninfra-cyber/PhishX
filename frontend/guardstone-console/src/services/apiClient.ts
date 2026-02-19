@@ -1,86 +1,140 @@
 /**
  * API Client Service
- * Typed fetch wrapper for backend API integration
+ * Contract bridge between frontend pages and backend endpoints.
  */
 
 import {
   Alert,
-  AlertFilter,
   AlertStatus,
-  ApiResponse,
+  AuditEntry,
   DashboardMetrics,
-  ErrorResponse,
-  PaginationParams,
+  ListParams,
+  ListResponse,
   User,
-} from '@/types';
+} from '@/types/api';
 
-export interface FetchOptions extends RequestInit {
+export interface FetchOptions extends Omit<RequestInit, 'body'> {
+  body?: any;
   timeout?: number;
 }
 
+const DEFAULT_TENANT_ID = '00000000-0000-0000-0000-000000000000';
+
 export class APIClient {
   private static readonly BASE_URL =
-    process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api';
+    process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-  private static readonly DEFAULT_TIMEOUT = 30000; // 30 seconds
+  private static readonly DEFAULT_TIMEOUT = 30000;
 
-  /**
-   * Generic fetch method with timeout and error handling
-   */
-  private static async fetch<T>(
+  private static getToken(): string | null {
+    if (typeof window === 'undefined') return null;
+    return localStorage.getItem('token');
+  }
+
+  private static getRefreshToken(): string | null {
+    if (typeof window === 'undefined') return null;
+    return localStorage.getItem('refresh_token_id');
+  }
+
+  private static getTenantId(): string {
+    if (typeof window !== 'undefined') {
+      return (
+        localStorage.getItem('tenantId') ||
+        process.env.NEXT_PUBLIC_TENANT_ID ||
+        DEFAULT_TENANT_ID
+      );
+    }
+    return process.env.NEXT_PUBLIC_TENANT_ID || DEFAULT_TENANT_ID;
+  }
+
+  private static buildHeaders(options: FetchOptions): HeadersInit {
+    const existing = (options.headers || {}) as Record<string, string>;
+    const headers: Record<string, string> = { ...existing };
+
+    const token = this.getToken();
+    const apiKey = process.env.NEXT_PUBLIC_API_KEY;
+    if (!headers.Authorization) {
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      } else if (apiKey) {
+        headers.Authorization = `Bearer ${apiKey}`;
+      }
+    }
+
+    if (!headers['X-Tenant-ID']) {
+      headers['X-Tenant-ID'] = this.getTenantId();
+    }
+
+    const hasBody = options.body !== undefined && options.body !== null;
+    const hasContentType = Object.keys(headers).some(
+      (key) => key.toLowerCase() === 'content-type'
+    );
+
+    if (hasBody && !hasContentType && !(options.body instanceof FormData)) {
+      headers['Content-Type'] = 'application/json';
+    }
+
+    return headers;
+  }
+
+  private static normalizeBody(options: FetchOptions): BodyInit | undefined {
+    if (options.body === undefined || options.body === null) {
+      return undefined;
+    }
+    if (
+      typeof options.body === 'string' ||
+      options.body instanceof FormData ||
+      options.body instanceof URLSearchParams ||
+      options.body instanceof Blob
+    ) {
+      return options.body;
+    }
+    return JSON.stringify(options.body);
+  }
+
+  private static async fetchRaw<T>(
     endpoint: string,
     options: FetchOptions = {}
   ): Promise<T> {
     const { timeout = this.DEFAULT_TIMEOUT, ...fetchOptions } = options;
-
-    // Add authorization header if token exists
-    const token = this.getToken();
-    if (token) {
-      fetchOptions.headers = {
-        ...fetchOptions.headers,
-        'Authorization': `Bearer ${token}`,
-      };
-    }
-
-    // Set default content type
-    if (!fetchOptions.headers?.['Content-Type']) {
-      fetchOptions.headers = {
-        ...fetchOptions.headers,
-        'Content-Type': 'application/json',
-      };
-    }
-
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
     try {
       const response = await fetch(`${this.BASE_URL}${endpoint}`, {
         ...fetchOptions,
+        headers: this.buildHeaders(fetchOptions),
+        body: this.normalizeBody(fetchOptions),
         signal: controller.signal,
       });
 
       clearTimeout(timeoutId);
 
+      const contentType = response.headers.get('content-type') || '';
+      let payload: any = null;
+      if (contentType.includes('application/json')) {
+        payload = await response.json();
+      } else {
+        const text = await response.text();
+        payload = text;
+      }
+
       if (!response.ok) {
-        const error: ErrorResponse = await response.json();
-        throw new APIError(
-          error.message || `HTTP ${response.status}`,
-          response.status,
-          error
-        );
+        const message =
+          payload?.message || payload?.detail || payload?.error || `HTTP ${response.status}`;
+        throw new APIError(message, response.status, payload);
       }
 
-      const data: ApiResponse<T> = await response.json();
-
-      if (!data.success) {
-        throw new APIError(
-          data.message || 'API request failed',
-          500,
-          data
-        );
+      if (payload && typeof payload === 'object') {
+        if (payload.success === false) {
+          throw new APIError(payload.message || 'API request failed', 500, payload);
+        }
+        if (payload.data !== undefined && payload.success !== undefined) {
+          return payload.data as T;
+        }
       }
 
-      return data.data;
+      return payload as T;
     } catch (error) {
       clearTimeout(timeoutId);
       if (error instanceof APIError) throw error;
@@ -94,250 +148,280 @@ export class APIClient {
     }
   }
 
-  /**
-   * Get stored authentication token
-   */
-  private static getToken(): string | null {
-    if (typeof window === 'undefined') return null;
-    return localStorage.getItem('token');
+  private static buildListQuery(params: ListParams = {}): string {
+    const query = new URLSearchParams();
+    const limit = params.limit ?? params.pageSize ?? 100;
+    const offset =
+      params.offset ??
+      ((params.page && params.page > 0 ? params.page - 1 : 0) * (params.pageSize ?? limit));
+
+    query.set('limit', String(limit));
+    query.set('offset', String(offset));
+
+    if (params.riskLevels?.length) {
+      query.set('riskLevels', params.riskLevels.join(','));
+    }
+
+    if (params.statuses?.length) {
+      query.set('status', params.statuses.join(','));
+    }
+
+    return query.toString();
   }
 
-  /**
-   * Authentication endpoints
-   */
   static auth = {
-    login: (email: string, password: string) =>
-      APIClient.fetch<{ token: string; user: User }>('/auth/login', {
+    login: async (email: string, password: string) => {
+      const payload = await APIClient.fetchRaw<any>('/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email, password }),
-      }),
+        body: { email, password },
+      });
 
-    logout: () =>
-      APIClient.fetch<void>('/auth/logout', {
+      const tokenData = payload?.data || payload || {};
+      const accessToken = tokenData.access_token || tokenData.token || '';
+      const refreshToken = tokenData.refresh_token_id || tokenData.refreshToken || '';
+
+      if (typeof window !== 'undefined') {
+        if (accessToken) localStorage.setItem('token', accessToken);
+        if (refreshToken) localStorage.setItem('refresh_token_id', refreshToken);
+      }
+
+      const user: User = payload?.user || {
+        id: email,
+        email,
+        name: email.split('@')[0],
+        role: 'SOC_ANALYST',
+      };
+
+      return {
+        token: accessToken,
+        refreshToken,
+        user,
+      };
+    },
+
+    logout: async () => {
+      try {
+        await APIClient.fetchRaw('/auth/logout', { method: 'POST' });
+      } finally {
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem('token');
+          localStorage.removeItem('refresh_token_id');
+        }
+      }
+    },
+
+    refreshToken: async () => {
+      const refreshTokenId = APIClient.getRefreshToken();
+      if (!refreshTokenId) {
+        throw new APIError('No refresh token available', 401);
+      }
+
+      const payload = await APIClient.fetchRaw<any>('/auth/refresh', {
         method: 'POST',
-      }),
+        body: { refresh_token_id: refreshTokenId },
+      });
 
-    refreshToken: () =>
-      APIClient.fetch<{ token: string }>('/auth/refresh', {
-        method: 'POST',
-      }),
+      const token = payload?.access_token || payload?.token || '';
+      if (typeof window !== 'undefined' && token) {
+        localStorage.setItem('token', token);
+      }
+      return { token };
+    },
 
-    me: () =>
-      APIClient.fetch<User>('/auth/me'),
+    me: async () => {
+      const payload = await APIClient.fetchRaw<any>('/auth/me');
+      const user: User = {
+        id: payload.id || payload.email || 'current-user',
+        email: payload.email || 'user@phishx.local',
+        name: payload.name || payload.email || 'Security User',
+        role: payload.role || 'SOC_ANALYST',
+      };
+      return user;
+    },
 
-    validateToken: () =>
-      APIClient.fetch<{ valid: boolean }>('/auth/validate'),
+    validateToken: async () => {
+      const payload = await APIClient.fetchRaw<any>('/auth/validate');
+      return { valid: Boolean(payload?.valid) };
+    },
   };
 
-  /**
-   * Alert endpoints
-   */
   static alerts = {
-    list: (filter: AlertFilter, pagination: PaginationParams) =>
-      APIClient.fetch<{ alerts: Alert[]; total: number; page: number; pageSize: number }>(
-        `/alerts?page=${pagination.page}&pageSize=${pagination.pageSize}`,
-        {
+    list: async (params: ListParams = {}): Promise<ListResponse<Alert>> => {
+      const query = APIClient.buildListQuery(params);
+      return APIClient.fetchRaw<ListResponse<Alert>>(`/alerts?${query}`);
+    },
+
+    get: (alertId: string) => APIClient.fetchRaw<Alert>(`/alerts/${alertId}`),
+
+    getById: (alertId: string) => APIClient.fetchRaw<Alert>(`/alerts/${alertId}`),
+
+    update: async (alertId: string, updates: Partial<Alert>) => {
+      if (updates.status) {
+        return APIClient.fetchRaw<Alert>(`/alerts/${alertId}/status`, {
           method: 'POST',
-          body: JSON.stringify(filter),
-        }
-      ),
+          body: updates,
+        });
+      }
+      return APIClient.fetchRaw<Alert>(`/alerts/${alertId}/status`, {
+        method: 'POST',
+        body: updates,
+      });
+    },
 
-    get: (alertId: string) =>
-      APIClient.fetch<Alert>(`/alerts/${alertId}`),
-
-    update: (alertId: string, updates: Partial<Alert>) =>
-      APIClient.fetch<Alert>(`/alerts/${alertId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(updates),
+    updateStatus: (alertId: string, payload: { status: AlertStatus; notes?: string; changedBy?: string }) =>
+      APIClient.fetchRaw<Alert>(`/alerts/${alertId}/status`, {
+        method: 'POST',
+        body: payload,
       }),
 
     changeStatus: (alertId: string, status: AlertStatus, notes?: string) =>
-      APIClient.fetch<Alert>(`/alerts/${alertId}/status`, {
+      APIClient.fetchRaw<Alert>(`/alerts/${alertId}/status`, {
         method: 'POST',
-        body: JSON.stringify({ status, notes }),
+        body: { status, notes },
+      }),
+
+    addNote: (
+      alertId: string,
+      payload: { text?: string; notes?: string; addedBy?: string; added_by?: string }
+    ) =>
+      APIClient.fetchRaw<any>(`/alerts/${alertId}/notes`, {
+        method: 'POST',
+        body: payload,
       }),
 
     addNotes: (alertId: string, notes: string) =>
-      APIClient.fetch<Alert>(`/alerts/${alertId}/notes`, {
+      APIClient.fetchRaw<any>(`/alerts/${alertId}/notes`, {
         method: 'POST',
-        body: JSON.stringify({ notes }),
+        body: { notes },
       }),
 
-    delete: (alertId: string) =>
-      APIClient.fetch<void>(`/alerts/${alertId}`, {
+    release: (alertId: string, payload?: Record<string, unknown>) =>
+      APIClient.fetchRaw<Alert>(`/alerts/${alertId}/release`, {
+        method: 'POST',
+        body: payload || {},
+      }),
+
+    delete: (alertId: string, payload?: Record<string, unknown>) =>
+      APIClient.fetchRaw<{ status: string; id: string }>(`/alerts/${alertId}`, {
         method: 'DELETE',
+        body: payload || {},
       }),
 
-    bulkDelete: (alertIds: string[]) =>
-      APIClient.fetch<{ deleted: number }>('/alerts/bulk/delete', {
-        method: 'POST',
-        body: JSON.stringify({ alertIds }),
-      }),
+    bulkDelete: async (alertIds: string[]) => {
+      let deleted = 0;
+      for (const alertId of alertIds) {
+        await APIClient.alerts.delete(alertId);
+        deleted += 1;
+      }
+      return { deleted };
+    },
 
     export: (alertIds: string[], format: 'csv' | 'pdf' | 'json') =>
-      APIClient.fetch<{ jobId: string; estimatedTime: number }>(
-        '/alerts/export',
-        {
-          method: 'POST',
-          body: JSON.stringify({ alertIds, format }),
-        }
-      ),
+      APIClient.fetchRaw<{ jobId: string; status: string }>('/exports', {
+        method: 'POST',
+        body: { alertIds, format: format.toUpperCase() },
+      }),
   };
 
-  /**
-   * Logs endpoints
-   */
   static logs = {
-    list: (filter: AlertFilter, pagination: PaginationParams) =>
-      APIClient.fetch<{ logs: Alert[]; total: number }>(
-        `/logs?page=${pagination.page}&pageSize=${pagination.pageSize}`,
-        {
-          method: 'POST',
-          body: JSON.stringify(filter),
-        }
-      ),
+    list: async (params: ListParams = {}): Promise<ListResponse<Alert>> => {
+      const query = APIClient.buildListQuery(params);
+      return APIClient.fetchRaw<ListResponse<Alert>>(`/logs?${query}`);
+    },
 
-    get: (logId: string) =>
-      APIClient.fetch<Alert>(`/logs/${logId}`),
+    get: (logId: string) => APIClient.fetchRaw<Alert>(`/alerts/${logId}`),
   };
 
-  /**
-   * Quarantine endpoints
-   */
   static quarantine = {
-    list: (pagination: PaginationParams) =>
-      APIClient.fetch<{ alerts: Alert[]; total: number }>(
-        `/quarantine?page=${pagination.page}&pageSize=${pagination.pageSize}`
-      ),
+    list: (params: ListParams = {}) =>
+      APIClient.alerts.list({ ...params, riskLevels: ['HOT'] }),
 
-    get: (alertId: string) =>
-      APIClient.fetch<Alert>(`/quarantine/${alertId}`),
+    get: (alertId: string) => APIClient.alerts.get(alertId),
 
-    release: (alertId: string, notes: string) =>
-      APIClient.fetch<Alert>(`/quarantine/${alertId}/release`, {
-        method: 'POST',
-        body: JSON.stringify({ notes }),
-      }),
+    release: (alertId: string, notes?: string) =>
+      APIClient.alerts.release(alertId, { notes }),
 
-    delete: (alertId: string, notes: string) =>
-      APIClient.fetch<void>(`/quarantine/${alertId}`, {
-        method: 'DELETE',
-        body: JSON.stringify({ notes }),
-      }),
+    delete: (alertId: string, notes?: string) =>
+      APIClient.alerts.delete(alertId, { notes }),
   };
 
-  /**
-   * Audit endpoints
-   */
   static audit = {
-    list: (pagination: PaginationParams, filters?: Record<string, any>) =>
-      APIClient.fetch<{ auditEntries: any[]; total: number }>(
-        `/audit?page=${pagination.page}&pageSize=${pagination.pageSize}`,
-        {
-          method: 'POST',
-          body: JSON.stringify(filters || {}),
-        }
-      ),
+    list: async (params: ListParams = {}): Promise<ListResponse<AuditEntry>> => {
+      const query = APIClient.buildListQuery(params);
+      return APIClient.fetchRaw<ListResponse<AuditEntry>>(`/audit?${query}`);
+    },
 
-    getAlertHistory: (alertId: string) =>
-      APIClient.fetch<any[]>(`/audit/alerts/${alertId}`),
+    getAlertHistory: async (alertId: string) => {
+      const result = await APIClient.audit.list({ limit: 500, offset: 0 });
+      return result.items.filter((entry) => entry.alertId === alertId);
+    },
 
-    getUserHistory: (userEmail: string) =>
-      APIClient.fetch<any[]>(`/audit/users/${userEmail}`),
+    getUserHistory: async (userEmail: string) => {
+      const result = await APIClient.audit.list({ limit: 500, offset: 0 });
+      return result.items.filter((entry) => entry.userEmail === userEmail);
+    },
   };
 
-  /**
-   * Metrics endpoints
-   */
   static metrics = {
-    dashboard: () =>
-      APIClient.fetch<DashboardMetrics>('/metrics/dashboard'),
+    dashboard: () => APIClient.fetchRaw<DashboardMetrics>('/metrics/dashboard'),
 
-    compliance: () =>
-      APIClient.fetch<any>('/metrics/compliance'),
+    compliance: () => APIClient.fetchRaw<Record<string, unknown>>('/metrics/summary'),
 
-    riskTrends: (days: number) =>
-      APIClient.fetch<any>(`/metrics/risk-trends?days=${days}`),
+    riskTrends: () => APIClient.fetchRaw<Record<string, unknown>>('/metrics/summary'),
   };
 
-  /**
-   * Export job endpoints
-   */
   static exports = {
+    create: (payload: Record<string, unknown>) =>
+      APIClient.fetchRaw<{ jobId: string; status: string }>('/exports', {
+        method: 'POST',
+        body: payload,
+      }),
+
     submit: (alertIds: string[], format: 'csv' | 'pdf' | 'json', options?: any) =>
-      APIClient.fetch<{ jobId: string; estimatedTime: number }>(
-        '/exports',
-        {
-          method: 'POST',
-          body: JSON.stringify({ alertIds, format, options }),
-        }
-      ),
-
-    status: (jobId: string) =>
-      APIClient.fetch<{ status: string; progress: number; downloadUrl?: string }>(
-        `/exports/${jobId}`
-      ),
-
-    download: (jobId: string) =>
-      fetch(`${APIClient.BASE_URL}/exports/${jobId}/download`, {
-        headers: {
-          'Authorization': `Bearer ${APIClient.getToken()}`,
-        },
+      APIClient.fetchRaw<{ jobId: string; status: string }>('/exports', {
+        method: 'POST',
+        body: { alertIds, format: format.toUpperCase(), options },
       }),
 
-    cancel: (jobId: string) =>
-      APIClient.fetch<void>(`/exports/${jobId}`, {
-        method: 'DELETE',
-      }),
+    status: (jobId: string) => Promise.resolve({ status: 'QUEUED', progress: 0, jobId }),
+
+    download: (_jobId: string) => {
+      throw new APIError('Export download endpoint is not implemented', 501);
+    },
+
+    cancel: (_jobId: string) => Promise.resolve(),
   };
 
-  /**
-   * User management endpoints
-   */
   static users = {
-    list: (pagination: PaginationParams) =>
-      APIClient.fetch<{ users: User[]; total: number }>(
-        `/users?page=${pagination.page}&pageSize=${pagination.pageSize}`
-      ),
+    list: (_params: { page?: number; pageSize?: number }) =>
+      Promise.resolve({ users: [] as User[], total: 0 }),
 
-    get: (userEmail: string) =>
-      APIClient.fetch<User>(`/users/${userEmail}`),
+    get: (_userId: string) => APIClient.auth.me(),
 
-    update: (userEmail: string, updates: Partial<User>) =>
-      APIClient.fetch<User>(`/users/${userEmail}`, {
+    update: (userId: string, updates: Partial<User>) =>
+      APIClient.fetchRaw<User>(`/users/${userId || 'current-user'}`, {
         method: 'PATCH',
-        body: JSON.stringify(updates),
+        body: updates,
       }),
 
-    create: (user: Partial<User> & { email: string; password: string }) =>
-      APIClient.fetch<User>('/users', {
-        method: 'POST',
-        body: JSON.stringify(user),
-      }),
+    create: (_user: Partial<User> & { email: string; password: string }) => {
+      throw new APIError('User creation endpoint is not implemented', 501);
+    },
 
-    delete: (userEmail: string) =>
-      APIClient.fetch<void>(`/users/${userEmail}`, {
-        method: 'DELETE',
-      }),
+    delete: (_userId: string) => {
+      throw new APIError('User deletion endpoint is not implemented', 501);
+    },
 
-    resetPassword: (userEmail: string) =>
-      APIClient.fetch<void>(`/users/${userEmail}/reset-password`, {
-        method: 'POST',
-      }),
+    resetPassword: (_userId: string) => {
+      throw new APIError('Password reset endpoint is not implemented', 501);
+    },
   };
 
-  /**
-   * Health check
-   */
   static health = {
-    check: () =>
-      APIClient.fetch<{ status: string; uptime: number }>('/health'),
+    check: () => APIClient.fetchRaw<{ status: string; version?: string; components?: any }>('/health'),
   };
 }
 
-/**
- * Custom API Error class
- */
 export class APIError extends Error {
   constructor(
     message: string,

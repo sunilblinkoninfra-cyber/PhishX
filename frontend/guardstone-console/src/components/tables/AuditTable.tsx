@@ -5,7 +5,7 @@
 
 'use client';
 
-import { AuditEntry } from '@/types';
+import { AuditEntry } from '@/types/api';
 import {
   Pagination,
   Card,
@@ -18,9 +18,12 @@ interface AuditTableProps {
   entries: AuditEntry[];
   loading?: boolean;
   pagination?: {
-    page: number;
+    page?: number;
+    currentPage?: number;
     pageSize: number;
-    total: number;
+    total?: number;
+    totalItems?: number;
+    totalPages?: number;
   };
   onPageChange?: (page: number) => void;
   onPageSizeChange?: (size: number) => void;
@@ -128,9 +131,18 @@ export function AuditTable({
       {/* Pagination */}
       {pagination && (
         <Pagination
-          currentPage={pagination.page}
-          totalPages={Math.ceil(pagination.total / pagination.pageSize)}
-          totalItems={pagination.total}
+          currentPage={pagination.currentPage ?? pagination.page ?? 1}
+          totalPages={
+            pagination.totalPages ??
+            Math.max(
+              1,
+              Math.ceil(
+                ((pagination.totalItems ?? pagination.total ?? entries.length) || 0) /
+                  Math.max(1, pagination.pageSize)
+              )
+            )
+          }
+          totalItems={pagination.totalItems ?? pagination.total ?? entries.length}
           pageSize={pagination.pageSize}
           onPageChange={onPageChange || (() => {})}
           onPageSizeChange={onPageSizeChange}

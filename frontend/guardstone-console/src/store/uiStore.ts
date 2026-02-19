@@ -1,10 +1,35 @@
 /**
- * Zustand UI Store
- * Manages UI state (sidebar, modals, notifications, etc.)
+ * UI store for page-level notifications and simple layout state.
  */
 
 import { create } from 'zustand';
-import { UIStoreState, Notification } from '@/types';
+
+type ToastType = 'success' | 'error' | 'warning' | 'info';
+
+interface Notification {
+  id: string;
+  type: ToastType;
+  message: string;
+  timestamp: Date;
+  autoClose?: boolean;
+  duration?: number;
+}
+
+interface UIStoreState {
+  isSidebarOpen: boolean;
+  selectedTab: string;
+  modalOpen: boolean;
+  modalType: string | null;
+  notifications: Notification[];
+
+  toggleSidebar: () => void;
+  setTab: (tab: string) => void;
+  openModal: (type: string, data?: unknown) => void;
+  closeModal: () => void;
+  addNotification: (notification: Omit<Notification, 'id' | 'timestamp'> & Partial<Pick<Notification, 'id' | 'timestamp'>>) => string;
+  addToast: (message: string, type?: ToastType, duration?: number) => string;
+  removeNotification: (id: string) => void;
+}
 
 export const useUIStore = create<UIStoreState>((set, get) => ({
   isSidebarOpen: true,
@@ -17,7 +42,7 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
 
   setTab: (tab: string) => set({ selectedTab: tab }),
 
-  openModal: (type: string, data?: any) => {
+  openModal: (type: string) => {
     set({
       modalOpen: true,
       modalType: type,
@@ -31,22 +56,37 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
     });
   },
 
-  addNotification: (notification: Notification) => {
-    const id = `notification-${Date.now()}`;
-    const newNotification = { ...notification, id };
+  addNotification: (notification) => {
+    const id = notification.id || `notification-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const newNotification: Notification = {
+      id,
+      type: notification.type,
+      message: notification.message,
+      timestamp: notification.timestamp || new Date(),
+      autoClose: notification.autoClose ?? true,
+      duration: notification.duration ?? 4000,
+    };
 
     set((state) => ({
       notifications: [...state.notifications, newNotification],
     }));
 
-    // Auto-remove after duration
-    if (notification.autoClose !== false && notification.duration) {
+    if (newNotification.autoClose !== false) {
       setTimeout(() => {
         get().removeNotification(id);
-      }, notification.duration);
+      }, newNotification.duration);
     }
 
     return id;
+  },
+
+  addToast: (message: string, type: ToastType = 'info', duration = 4000) => {
+    return get().addNotification({
+      type,
+      message,
+      duration,
+      autoClose: true,
+    });
   },
 
   removeNotification: (id: string) => {
