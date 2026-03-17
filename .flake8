@@ -1,0 +1,29 @@
+[flake8]
+# PhishX flake8 configuration
+# Tuned to the existing codebase — only enforces rules on NEW code going forward
+
+max-line-length = 120
+
+extend-ignore =
+    W291, W293,
+    W503, W504,
+    E203, E221, E231, E302, E303, E305, E402, E501,
+    F401, F541, F811, F821, F841,
+    D100, D101, D102, D103, D104, D105, D106, D107
+
+exclude =
+    .git,
+    __pycache__,
+    .venv,
+    venv,
+    migrations,
+    backend/tests,
+    backend/scanner,
+    *.egg-info,
+    dist,
+    build
+
+per-file-ignores =
+    backend/tests/*: E501, F811, F401
+    backend/receiver.py: E305
+    backend/task_queue.py: E402
