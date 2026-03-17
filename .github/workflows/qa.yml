@@ -1,0 +1,247 @@
+# PhishX QA Pipeline — Lighthouse + Load Tests
+# QA Agent: AI Co-worker
+# Triggers: push to develop, weekly schedule, manual dispatch
+
+name: PhishX QA
+
+on:
+  push:
+    branches: [develop]
+  schedule:
+    # Run every Monday 06:00 UTC against staging
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Target URL for load test'
+        required: false
+        default: 'http://localhost:8000'
+
+jobs:
+  # ── Lighthouse audit ──────────────────────────────────────────
+  lighthouse:
+    name: Lighthouse — Performance & Accessibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: npm
+          cache-dependency-path: frontend/guardstone-console/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend/guardstone-console
+        run: npm ci
+
+      - name: Build Next.js app
+        working-directory: frontend/guardstone-console
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+
+      - name: Start Next.js server
+        working-directory: frontend/guardstone-console
+        run: npm start &
+        env:
+          PORT: 3000
+
+      - name: Wait for server
+        run: |
+          for i in {1..15}; do
+            curl -s http://localhost:3000 > /dev/null && echo "Server ready" && break
+            echo "Waiting... ($i/15)"
+            sleep 2
+          done
+
+      - name: Install Lighthouse CI
+        run: npm install -g @lhci/cli
+
+      - name: Run Lighthouse CI
+        run: lhci autorun
+        working-directory: frontend/guardstone-console
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+        continue-on-error: true
+
+      - name: Upload Lighthouse report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lighthouse-report
+          path: frontend/guardstone-console/.lighthouseci/
+
+  # ── Load test (Locust) ────────────────────────────────────────
+  load-test-locust:
+    name: Load Test — Locust (API SLA validation)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: phishx
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: phishx_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install locust
+
+      - name: Start API server
+        run: |
+          cp .env.example .env
+          echo "DATABASE_URL=postgresql://phishx:test_password@localhost:5432/phishx_test" >> .env
+          echo "REDIS_URL=redis://localhost:6379/0" >> .env
+          echo "CELERY_BROKER_URL=redis://localhost:6379/1" >> .env
+          echo "JWT_SECRET_KEY=qa-load-test-secret-key" >> .env
+          echo "ENVIRONMENT=test" >> .env
+          cd backend && uvicorn app_new:app --host 0.0.0.0 --port 8000 &
+          sleep 8
+        env:
+          PYTHONPATH: ${{ github.workspace }}/backend
+
+      - name: Verify API is up
+        run: curl -f http://localhost:8000/health
+
+      - name: Run Locust load test
+        run: |
+          locust -f backend/tests/load/locustfile.py \
+            --headless \
+            --users 50 \
+            --spawn-rate 5 \
+            --run-time 60s \
+            --host http://localhost:8000 \
+            --html backend/tests/load/locust-report.html \
+            --csv backend/tests/load/locust-stats \
+            --exit-code-on-error 1
+        continue-on-error: true
+
+      - name: Upload Locust report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: locust-report
+          path: backend/tests/load/
+
+  # ── Load test (k6) ────────────────────────────────────────────
+  load-test-k6:
+    name: Load Test — k6 (SLA thresholds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update && sudo apt-get install k6 -y
+
+      - name: Set up Python + start API
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install backend deps and start API
+        run: |
+          pip install -r backend/requirements.txt
+          cp .env.example .env
+          echo "DATABASE_URL=sqlite:///./test.db" >> .env
+          echo "REDIS_URL=redis://localhost:6379/0" >> .env
+          echo "JWT_SECRET_KEY=k6-test-secret" >> .env
+          echo "ENVIRONMENT=test" >> .env
+          cd backend && uvicorn app_new:app --host 0.0.0.0 --port 8000 &
+          sleep 8
+        env:
+          PYTHONPATH: ${{ github.workspace }}/backend
+
+      - name: Run k6 load test
+        run: |
+          k6 run backend/tests/load/k6-scan.js \
+            --env BASE_URL=http://localhost:8000
+        continue-on-error: true
+
+      - name: Upload k6 report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k6-report
+          path: backend/tests/load/k6-report.json
+
+  # ── Security headers check ────────────────────────────────────
+  security-headers:
+    name: Security Headers — HTTPS & CSP validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: npm
+          cache-dependency-path: frontend/guardstone-console/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend/guardstone-console
+        run: npm ci
+
+      - name: Build and start Next.js
+        working-directory: frontend/guardstone-console
+        run: |
+          npm run build
+          npm start &
+          sleep 5
+        env:
+          PORT: 3000
+
+      - name: Check security headers
+        run: |
+          HEADERS=$(curl -sI http://localhost:3000)
+          echo "$HEADERS"
+
+          check_header() {
+            if echo "$HEADERS" | grep -qi "$1"; then
+              echo "✓ $1 present"
+            else
+              echo "✗ $1 MISSING"
+              MISSING=1
+            fi
+          }
+
+          MISSING=0
+          check_header "x-content-type-options"
+          check_header "x-frame-options"
+          check_header "referrer-policy"
+          check_header "x-xss-protection"
+
+          if [ "$MISSING" = "1" ]; then
+            echo "❌ One or more security headers are missing"
+            exit 1
+          else
+            echo "✅ All required security headers present"
+          fi
