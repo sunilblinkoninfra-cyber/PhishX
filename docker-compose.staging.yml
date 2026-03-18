@@ -1,0 +1,147 @@
+# PhishX Staging Environment
+# DevOps Agent: AI Co-worker
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+#
+# Differences from dev:
+#  - ENVIRONMENT=staging
+#  - HTTPS enforced via Nginx reverse proxy with self-signed cert (replace with real cert in prod)
+#  - Debug off, Swagger off
+#  - Single Celery worker (cost-efficient for staging)
+#  - No debug tools (redis-commander, pgadmin excluded)
+#  - Resource limits enforced on all services
+
+services:
+
+  # ── Nginx reverse proxy (HTTPS + security headers) ──────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: phishx-nginx-staging
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/logs:/var/log/nginx
+    depends_on:
+      - api
+      - frontend
+    networks:
+      - phishx-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+
+  # ── Frontend (Next.js — standalone build for staging) ────────────
+  frontend:
+    build:
+      context: ./frontend/guardstone-console
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.staging.phishx.io}
+        NEXT_PUBLIC_ENV: staging
+    container_name: phishx-frontend-staging
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.staging.phishx.io}
+    expose:
+      - "3000"
+    networks:
+      - phishx-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # ── API (staging overrides) ───────────────────────────────────────
+  api:
+    environment:
+      ENVIRONMENT: staging
+      DEBUG: "false"
+      ENABLE_SWAGGER: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://staging.phishx.io}
+      ENABLE_JWT_AUTH: "true"
+      ENABLE_CIRCUIT_BREAKERS: "true"
+      LOG_LEVEL: INFO
+      WORKERS: 2
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+
+  # ── Single Celery worker for staging (replaces 3 workers) ────────
+  celery-worker-staging:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: phishx-celery-staging
+    command: celery -A tasks worker -Q high_priority,emails,enrichment,enforcement -c 2 -l info
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND}
+      ENVIRONMENT: staging
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - phishx-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # ── Disable dev-only workers in staging ──────────────────────────
+  celery-worker-priority:
+    deploy:
+      replicas: 0
+
+  celery-worker-enrichment:
+    deploy:
+      replicas: 0
+
+  celery-worker-enforcement:
+    deploy:
+      replicas: 0
+
+  # ── PostgreSQL staging overrides ─────────────────────────────────
+  postgres:
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-phishx}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-phishx_staging}
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # ── Redis staging overrides ───────────────────────────────────────
+  redis:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M

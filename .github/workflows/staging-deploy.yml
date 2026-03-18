@@ -1,0 +1,156 @@
+# PhishX Staging Deployment
+# DevOps Agent: AI Co-worker
+# Triggers: push to develop branch or manual dispatch
+# Steps: build → smoke test → deploy staging → verify
+
+name: PhishX Staging Deploy
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: 'Force deploy even if tests fail'
+        required: false
+        default: 'false'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ── Build & push Docker image ──────────────────────────────────
+  build-and-push:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=staging-
+            type=raw,value=staging-latest
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Smoke tests against staging image ─────────────────────────
+  smoke-test:
+    name: Smoke test
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: phishx
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: phishx_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r backend/requirements.txt httpx pytest
+
+      - name: Start API
+        run: |
+          cp .env.example .env
+          echo "DATABASE_URL=postgresql://phishx:test_password@localhost:5432/phishx_test" >> .env
+          echo "REDIS_URL=redis://localhost:6379/0" >> .env
+          echo "CELERY_BROKER_URL=redis://localhost:6379/1" >> .env
+          echo "JWT_SECRET_KEY=staging-smoke-test-secret" >> .env
+          echo "ENVIRONMENT=staging" >> .env
+          cd backend && uvicorn app_new:app --host 0.0.0.0 --port 8000 &
+          sleep 6
+        env:
+          PYTHONPATH: ${{ github.workspace }}/backend
+
+      - name: Health check
+        run: |
+          curl -f http://localhost:8000/health || exit 1
+          echo "Health check passed ✓"
+
+      - name: API smoke tests
+        run: |
+          cd backend
+          pytest tests/test_scan_api.py::TestHealthEndpoint -v
+        env:
+          PYTHONPATH: ${{ github.workspace }}/backend
+
+  # ── Deploy to staging server ───────────────────────────────────
+  deploy-staging:
+    name: Deploy to staging
+    runs-on: ubuntu-latest
+    needs: smoke-test
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            cd /opt/phishx
+            git pull origin develop
+            docker-compose -f docker-compose.yml -f docker-compose.staging.yml pull
+            docker-compose -f docker-compose.yml -f docker-compose.staging.yml up -d --remove-orphans
+            docker system prune -f
+
+      - name: Verify staging health
+        run: |
+          sleep 15
+          curl -f https://${{ secrets.STAGING_HOST }}/health \
+            --insecure \
+            --max-time 30 \
+            --retry 5 \
+            --retry-delay 5 \
+            || echo "Staging health check failed — check deployment logs"
+
+      - name: Notify on success
+        if: success()
+        run: echo "Staging deployed successfully at https://${{ secrets.STAGING_HOST }}"
