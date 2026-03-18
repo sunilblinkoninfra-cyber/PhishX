@@ -256,11 +256,19 @@ class EmailIngestRequest(BaseModel):
     @root_validator
     def validate_total_size(cls, values):
         """Validate total email size"""
-        subject = values.get("subject", "")
-        sender = values.get("sender", "")
-        body = values.get("body", "")
-        urls = values.get("urls", [])
-        attachments = values.get("attachments", [])
+        # Handle both Pydantic v1 (dict) and v2 (model instance) values
+        if hasattr(values, 'get'):
+            subject = values.get("subject", "") or ""
+            sender = values.get("sender", "") or ""
+            body = values.get("body", "") or ""
+            urls = values.get("urls", []) or []
+            attachments = values.get("attachments", []) or []
+        else:
+            subject = getattr(values, "subject", "") or ""
+            sender = getattr(values, "sender", "") or ""
+            body = getattr(values, "body", "") or ""
+            urls = getattr(values, "urls", []) or []
+            attachments = getattr(values, "attachments", []) or []
         
         total_size = (
             len(subject.encode()) +
