@@ -740,39 +740,69 @@ async def auth_validate(authorization: Optional[str] = Header(None)) -> dict:
 # Health & Status Endpoints
 # ========================================
 
+# ── Health check cache (5-second TTL) ────────────────────────────────────────
+# Avoids hitting DB + Redis on every liveness probe request.
+# Cache stores (result, timestamp). Refreshed after HEALTH_CACHE_TTL seconds.
+_health_cache: Tuple[Optional[HealthResponse], float] = (None, 0.0)
+HEALTH_CACHE_TTL: float = 5.0  # seconds
+
+
+async def _build_health_response() -> HealthResponse:
+    """Run the actual DB + Redis checks and return a HealthResponse."""
+    health = ComponentHealthCheck.check_database()
+    redis_health = ComponentHealthCheck.check_redis()
+
+    def _norm_status(s):
+        if hasattr(s, "value"):
+            return s.value
+        return str(s).lower()
+
+    status = (
+        "ok"
+        if (
+            _norm_status(health.get("status")) == "healthy"
+            and _norm_status(redis_health.get("status")) == "healthy"
+        )
+        else "degraded"
+    )
+    return HealthResponse(
+        status=status,
+        version="1.0.0",
+        components={
+            "database": _norm_status(health.get("status")),
+            "redis": _norm_status(redis_health.get("status")),
+        },
+    )
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
     """
     Quick health check endpoint (DB + Redis only).
     Lightweight check for Kubernetes liveness probes.
+    Results are cached for 5 seconds to avoid synchronous DB/Redis
+    calls on every request under high probe frequency.
     """
+    global _health_cache
+    cached_result, cached_at = _health_cache
+
+    # Return cached result if still fresh
+    if cached_result is not None and (time.monotonic() - cached_at) < HEALTH_CACHE_TTL:
+        return cached_result
+
+    # Cache miss or expired — run real checks
     try:
-        # ComponentHealthCheck methods are synchronous; call directly.
-        health = ComponentHealthCheck.check_database()
-        redis_health = ComponentHealthCheck.check_redis()
-
-        def _norm_status(s):
-            if hasattr(s, "value"):
-                return s.value
-            return str(s).lower()
-
-        status = "ok" if (_norm_status(health.get("status")) == "healthy" and _norm_status(redis_health.get("status")) == "healthy") else "degraded"
-
-        return HealthResponse(
-            status=status,
-            version="1.0.0",
-            components={
-                "database": _norm_status(health.get("status")),
-                "redis": _norm_status(redis_health.get("status")),
-            },
-        )
+        result = await _build_health_response()
     except Exception as e:
         logger.error("health_check_failed", error=str(e))
-        return HealthResponse(
+        result = HealthResponse(
             status="degraded",
             version="1.0.0",
             components={"error": str(e)},
         )
+
+    _health_cache = (result, time.monotonic())
+    return result
 
 
 @app.get("/health/full")
