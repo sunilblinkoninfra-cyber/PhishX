@@ -742,21 +742,22 @@ async def auth_validate(authorization: Optional[str] = Header(None)) -> dict:
 # ========================================
 
 # ── Health check cache (5-second TTL) ────────────────────────────────────────
-# Avoids hitting DB + Redis on every liveness probe request.
-# Cache stores (result, timestamp). Refreshed after HEALTH_CACHE_TTL seconds.
-_health_cache: Tuple[Optional[HealthResponse], float] = (None, 0.0)
-HEALTH_CACHE_TTL: float = 5.0  # seconds
+_health_cache: Tuple[Optional[dict], float] = (None, 0.0)
+HEALTH_CACHE_TTL: float = 5.0
 
 
-def _run_health_checks() -> HealthResponse:
+def _run_health_checks_sync() -> dict:
     """
-    Run synchronous DB + Redis checks safely.
-    Always returns a HealthResponse — never raises.
+    Synchronous health checks — safe to run in a thread pool executor.
+    ALWAYS returns a dict, never raises.
     """
     def _norm(s) -> str:
-        if hasattr(s, "value"):
-            return str(s.value).lower()
-        return str(s).lower()
+        try:
+            if hasattr(s, "value"):
+                return str(s.value).lower()
+            return str(s).lower()
+        except Exception:
+            return "unknown"
 
     db_status = "unknown"
     redis_status = "unknown"
@@ -764,53 +765,51 @@ def _run_health_checks() -> HealthResponse:
     try:
         db_result = ComponentHealthCheck.check_database()
         db_status = _norm(db_result.get("status", "unknown"))
-    except Exception as e:
+    except Exception as exc:
         db_status = "unhealthy"
-        logger.warning("health_db_check_failed", error=str(e))
+        logger.warning("health_db_check_error", error=str(exc))
 
     try:
         redis_result = ComponentHealthCheck.check_redis()
         redis_status = _norm(redis_result.get("status", "unknown"))
-    except Exception as e:
+    except Exception as exc:
         redis_status = "unhealthy"
-        logger.warning("health_redis_check_failed", error=str(e))
+        logger.warning("health_redis_check_error", error=str(exc))
 
-    overall = "ok" if db_status == "healthy" and redis_status == "healthy" else "degraded"
-
-    return HealthResponse(
-        status=overall,
-        version="1.0.0",
-        components={"database": db_status, "redis": redis_status},
-    )
+    overall = "ok" if (db_status == "healthy" and redis_status == "healthy") else "degraded"
+    return {"status": overall, "version": "1.0.0", "components": {"database": db_status, "redis": redis_status}}
 
 
+# No response_model — return JSONResponse directly to bypass Pydantic
+# serialisation entirely and prevent FastAPI's global exception handler
+# from swallowing errors raised during response model validation.
 @app.get("/health")
-async def health_check() -> dict:
+async def health_check():
     """
-    Quick health check — ALWAYS returns HTTP 200.
-    Results cached for 5s. Use status field: ok | degraded.
+    Liveness + readiness probe. Always returns HTTP 200.
+    status: ok | degraded. Results cached 5 s.
     """
+    import asyncio as _asyncio
+    from fastapi.responses import JSONResponse as _JSONResponse
+
     global _health_cache
     cached_result, cached_at = _health_cache
 
-    # Serve from cache if still fresh
+    # Serve cached result if still fresh
     if cached_result is not None and (time.monotonic() - cached_at) < HEALTH_CACHE_TTL:
-        return cached_result.dict()
+        return _JSONResponse(content=cached_result, status_code=200)
 
-    # Run blocking checks in thread pool — keeps event loop free
+    # Run blocking checks in a thread pool — keeps event loop free
+    result = {"status": "degraded", "version": "1.0.0", "components": {}}
     try:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, _run_health_checks)
-    except Exception as e:
-        logger.error("health_check_executor_failed", error=str(e))
-        result = HealthResponse(
-            status="degraded",
-            version="1.0.0",
-            components={"error": "health check unavailable"},
-        )
+        loop = _asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _run_health_checks_sync)
+    except Exception as exc:
+        logger.error("health_executor_error", error=str(exc))
+        result = {"status": "degraded", "version": "1.0.0", "components": {"error": "check failed"}}
 
     _health_cache = (result, time.monotonic())
-    return result.dict()
+    return _JSONResponse(content=result, status_code=200)
 
 
 @app.get("/health/full")
