@@ -15,7 +15,7 @@ import os
 import uuid
 import json
 from datetime import datetime
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Tuple
 from contextlib import asynccontextmanager
 
 import requests
