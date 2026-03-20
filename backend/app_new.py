@@ -747,58 +747,67 @@ _health_cache: Tuple[Optional[HealthResponse], float] = (None, 0.0)
 HEALTH_CACHE_TTL: float = 5.0  # seconds
 
 
-async def _build_health_response() -> HealthResponse:
-    """Run the actual DB + Redis checks and return a HealthResponse."""
-    health = ComponentHealthCheck.check_database()
-    redis_health = ComponentHealthCheck.check_redis()
-
-    def _norm_status(s):
+def _run_health_checks() -> HealthResponse:
+    """
+    Run synchronous DB + Redis checks safely.
+    Always returns a HealthResponse — never raises.
+    """
+    def _norm(s) -> str:
         if hasattr(s, "value"):
-            return s.value
+            return str(s.value).lower()
         return str(s).lower()
 
-    status = (
-        "ok"
-        if (
-            _norm_status(health.get("status")) == "healthy"
-            and _norm_status(redis_health.get("status")) == "healthy"
-        )
-        else "degraded"
-    )
+    db_status = "unknown"
+    redis_status = "unknown"
+
+    try:
+        db_result = ComponentHealthCheck.check_database()
+        db_status = _norm(db_result.get("status", "unknown"))
+    except Exception as e:
+        db_status = "unhealthy"
+        logger.warning("health_db_check_failed", error=str(e))
+
+    try:
+        redis_result = ComponentHealthCheck.check_redis()
+        redis_status = _norm(redis_result.get("status", "unknown"))
+    except Exception as e:
+        redis_status = "unhealthy"
+        logger.warning("health_redis_check_failed", error=str(e))
+
+    overall = "ok" if db_status == "healthy" and redis_status == "healthy" else "degraded"
+
     return HealthResponse(
-        status=status,
+        status=overall,
         version="1.0.0",
-        components={
-            "database": _norm_status(health.get("status")),
-            "redis": _norm_status(redis_health.get("status")),
-        },
+        components={"database": db_status, "redis": redis_status},
     )
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
     """
-    Quick health check endpoint (DB + Redis only).
-    Lightweight check for Kubernetes liveness probes.
-    Results are cached for 5 seconds to avoid synchronous DB/Redis
-    calls on every request under high probe frequency.
+    Quick health check — always returns HTTP 200.
+    Results cached for 5s to avoid hammering DB/Redis on every probe.
+    Use status field to determine health: ok | degraded.
     """
     global _health_cache
     cached_result, cached_at = _health_cache
 
-    # Return cached result if still fresh
+    # Serve from cache if still fresh
     if cached_result is not None and (time.monotonic() - cached_at) < HEALTH_CACHE_TTL:
         return cached_result
 
-    # Cache miss or expired — run real checks
+    # Cache miss — run checks in thread pool to avoid blocking the event loop
     try:
-        result = await _build_health_response()
+        import asyncio
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _run_health_checks)
     except Exception as e:
-        logger.error("health_check_failed", error=str(e))
+        logger.error("health_check_executor_failed", error=str(e))
         result = HealthResponse(
             status="degraded",
             version="1.0.0",
-            components={"error": str(e)},
+            components={"error": "health check unavailable"},
         )
 
     _health_cache = (result, time.monotonic())
