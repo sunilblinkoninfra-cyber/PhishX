@@ -14,6 +14,7 @@ Main API Gateway application with:
 import os
 import uuid
 import json
+import asyncio
 from datetime import datetime
 from typing import Optional, Any, Dict, List, Tuple
 from contextlib import asynccontextmanager
@@ -783,24 +784,22 @@ def _run_health_checks() -> HealthResponse:
     )
 
 
-@app.get("/health", response_model=HealthResponse)
-async def health_check() -> HealthResponse:
+@app.get("/health")
+async def health_check() -> dict:
     """
-    Quick health check — always returns HTTP 200.
-    Results cached for 5s to avoid hammering DB/Redis on every probe.
-    Use status field to determine health: ok | degraded.
+    Quick health check — ALWAYS returns HTTP 200.
+    Results cached for 5s. Use status field: ok | degraded.
     """
     global _health_cache
     cached_result, cached_at = _health_cache
 
     # Serve from cache if still fresh
     if cached_result is not None and (time.monotonic() - cached_at) < HEALTH_CACHE_TTL:
-        return cached_result
+        return cached_result.dict()
 
-    # Cache miss — run checks in thread pool to avoid blocking the event loop
+    # Run blocking checks in thread pool — keeps event loop free
     try:
-        import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _run_health_checks)
     except Exception as e:
         logger.error("health_check_executor_failed", error=str(e))
@@ -811,7 +810,7 @@ async def health_check() -> HealthResponse:
         )
 
     _health_cache = (result, time.monotonic())
-    return result
+    return result.dict()
 
 
 @app.get("/health/full")
